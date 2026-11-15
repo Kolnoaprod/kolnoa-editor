@@ -1,16 +1,42 @@
-"""Accès à ffmpeg / ffprobe et choix de l'encodeur (NVENC sur le Shadow PC si dispo)."""
+"""Accès à ffmpeg / ffprobe, exécution annulable et choix de l'encodeur (NVENC sur le Shadow PC)."""
 
 from __future__ import annotations
 
 import functools
+import logging
 import os
 import shutil
 import subprocess
-from pathlib import Path
+import sys
+import tempfile
+import threading
+
+log = logging.getLogger("kolnoa.ffmpeg")
 
 
 class FFmpegError(RuntimeError):
     pass
+
+
+class Cancelled(RuntimeError):
+    """Opération annulée par l'utilisateur (Ctrl+C ou bouton Annuler)."""
+
+
+class CancelToken:
+    """Jeton d'annulation partagé entre l'interface (ou la CLI) et les traitements."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def raise_if_cancelled(self) -> None:
+        if self._event.is_set():
+            raise Cancelled("Opération annulée")
 
 
 def _find(name: str, env_var: str) -> str:
@@ -20,7 +46,7 @@ def _find(name: str, env_var: str) -> str:
     found = shutil.which(name)
     if not found:
         raise FFmpegError(
-            f"{name} introuvable. Installe ffmpeg (ex. `winget install ffmpeg`) "
+            f"{name} introuvable. Installe ffmpeg (ex. `winget install Gyan.FFmpeg`) "
             f"ou définis la variable {env_var}."
         )
     return found
@@ -34,12 +60,48 @@ def ffprobe_bin() -> str:
     return _find("ffprobe", "KOLNOA_FFPROBE")
 
 
-def run(cmd: list[str]) -> subprocess.CompletedProcess:
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if proc.returncode != 0:
-        tail = "\n".join(proc.stderr.strip().splitlines()[-12:])
-        raise FFmpegError(f"Commande échouée ({proc.returncode}): {' '.join(cmd[:6])} ...\n{tail}")
-    return proc
+def run(cmd: list[str], cancel: CancelToken | None = None, quiet: bool = False) -> subprocess.CompletedProcess:
+    """Exécute une commande. Annulable : le processus est arrêté si `cancel` est déclenché.
+
+    stdout/stderr passent par des fichiers temporaires (pas de blocage de tube sur les longues
+    sorties) ; sur Windows aucune fenêtre console n'est ouverte.
+    """
+    if cancel is not None:
+        cancel.raise_if_cancelled()
+    log.debug("exec: %s", cmd)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.DEVNULL, stdout=out, stderr=err, creationflags=flags
+        )
+        try:
+            while True:
+                try:
+                    rc = proc.wait(timeout=0.2)
+                    break
+                except subprocess.TimeoutExpired:
+                    if cancel is not None and cancel.is_set():
+                        proc.terminate()
+                        try:
+                            proc.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+                            proc.wait()
+                        raise Cancelled("Opération annulée")
+        except BaseException:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            raise
+        out.seek(0)
+        err.seek(0)
+        stdout = out.read().decode("utf-8", "replace")
+        stderr = err.read().decode("utf-8", "replace")
+    if rc != 0:
+        tail = "\n".join(stderr.strip().splitlines()[-12:])
+        (log.debug if quiet else log.error)("commande échouée (%s): %s\n%s", rc, cmd, stderr[-4000:])
+        raise FFmpegError(f"Commande échouée ({rc}): {' '.join(cmd[:6])} ...\n{tail}")
+    return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
 
 
 @functools.lru_cache(maxsize=1)
@@ -53,11 +115,16 @@ def has_nvenc() -> bool:
                 ffmpeg_bin(), "-hide_banner", "-v", "error",
                 "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
                 "-c:v", "h264_nvenc", "-f", "null", "-",
-            ]
+            ],
+            quiet=True,
         )
         return True
     except (FFmpegError, OSError):
         return False
+
+
+def encoder_name() -> str:
+    return "h264_nvenc" if has_nvenc() else "libx264"
 
 
 def video_encoder_args(quality: str) -> list[str]:
@@ -69,7 +136,3 @@ def video_encoder_args(quality: str) -> list[str]:
     if quality == "proxy":
         return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"]
     return ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
-
-
-def as_posix_arg(path: Path | str) -> str:
-    return str(path)

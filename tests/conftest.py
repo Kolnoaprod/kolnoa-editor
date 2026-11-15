@@ -41,3 +41,11 @@ def wedding(tmp_path_factory):
     _ff("-f", "lavfi", "-i", "sine=f=330:d=30", str(root / "musique.mp3"))
     (root / "notes.txt").write_text("ignoré")
     return root
+
+
+@pytest.fixture
+def mariage(wedding, tmp_path):
+    """Copie modifiable du faux mariage."""
+    from helpers import copy_wedding
+
+    return copy_wedding(wedding, tmp_path / "mariage")
