@@ -2,8 +2,7 @@
 
 **Confirmé par l'utilisateur** : des fondus et des transitions avec flash, « des choses simples », dans un
 montage cinématographique haut de gamme, fluide, sans jump cuts agressifs. Pas d'effets compliqués.
-Les durées par défaut et les règles d'emploi ci-dessous sont des **propositions à valider** (cf. issue #1) :
-aucune durée n'est figée tant qu'elle n'a pas été vue à l'œil sur un vrai film.
+Les durées par défaut sont **confirmées** ; les règles d'emploi ci-dessous restent des **propositions à valider** (cf. issue #1).
 
 ## Catalogue volontairement court
 
@@ -52,14 +51,10 @@ Une transition est un **objet posé sur une coupe**, pas un réglage caché :
 5. **Aperçu = export** : même chaîne de filtres pour le proxy et le rendu final (critère SSIM de la PR D).
 6. Réversible et verrouillable comme le reste : `set_transition` / `remove_transition`, refusées sur un plan verrouillé.
 
-## Valeurs de départ à tester (hypothèses, non confirmées)
+## Durées par défaut (confirmées par l'utilisateur)
 
 Fondu enchaîné : environ 0,5 s (12 images à 25 i/s) ; fondu au noir : 0,8 à 1 s ; flash : 4 à 6 images au total.
 À régler sur de vrais rushes puis à figer ici une fois validées.
-
-## Question ouverte
-
-- Durée par défaut du fondu enchaîné et du fondu au noir ? (flash : 6 images, réglé.)
 
 ## Plan technique (PR D)
 
