@@ -54,6 +54,14 @@ kolnoa timeline-apply $M ops.json    # applique des opérations JSON en UNE acti
 kolnoa timeline-undo $M ; kolnoa timeline-redo $M
 kolnoa timeline-export $M v002.json  # retour vers une liste de décisions
 kolnoa timeline-render $M --final    # rendu de la timeline courante
+
+# Multicam et synchronisation (voir docs/SYNC.md)
+kolnoa multicam-create $M --master REC=AUDIO/rec.wav --angle A7=MAIRIE/A7IV/C0001.MP4 --angle DRONE=DRONE/DJI_0012.MP4
+kolnoa multicam-sync $M g001 --dry-run     # synchro audio + dérive ; propositions visuelles pour le drone muet
+kolnoa multicam-sync $M g001               # enregistre (annulable) ; ajouter --accept-visual 1 pour poser la proposition
+kolnoa multicam-align $M g001 DRONE --point 3.0 41.0      # alignement manuel par repères (2 repères = dérive)
+kolnoa multicam-nudge $M g001 DRONE +1     # image par image ; multicam-lock / multicam-accept / multicam-at
+kolnoa sync-calibrate "G:\\Mon Drive\\…\\MARIAGE …" --scenario mairie --out C:\\Kolnoa\\calibration\\mairie --dry-run   # mesure sur de vrais rushes, LECTURE SEULE (docs/SYNC_CALIBRATION.md)
 ```
 
 Journal détaillé : `<données>\logs\kolnoa.log`.
@@ -68,7 +76,7 @@ Journal détaillé : `<données>\logs\kolnoa.log`.
 | Rendu atomique, annulable, avec cache et reprise ; raccords exacts à l'image | fait (PR 1) |
 | Filiation des ids de segments, versions, retours reportés, diff | fait (PR 1) |
 | Timeline native, opérations réversibles, annuler/rétablir persistants, passerelle liste de décisions | fait (PR A) |
-| Multicam, synchro audio / visuelle / manuelle | à faire (PR B) |
+| Multicam, synchro audio (décalage, dérive, discontinuités), visuelle assistée expérimentale, manuelle image par image, niveaux de confiance | moteur de synchro implémenté (PR #9) ; **rendu multicam non disponible avant la PR D** ; seuils à calibrer sur vrais rushes |
 | Interface timeline, lecteur proxy | à faire (PR C) |
 | Effets, LUTs, transitions, musique, mixage | à faire (PR D) |
 | Assistant en langage naturel, montage automatique, « Rythmer » | à faire (PR E) |

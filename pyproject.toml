@@ -7,7 +7,7 @@ name = "kolnoa-editor"
 version = "0.1.0"
 description = "Kolnoa Editor : montage de films de mariage assisté par IA (Claude / ChatGPT)"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]

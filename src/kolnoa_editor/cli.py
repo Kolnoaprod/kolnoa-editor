@@ -15,9 +15,15 @@ from .preflight import PreflightError, format_issues, has_errors, preflight
 from .project import Project
 from .proxies import build_proxies
 from .renderer import RenderError, clean_cache, render
-from .scanner import refresh, summarize
-from .timeline import (Session, Transaction, TimelineError, from_decision_list, op_from_dict,
-                       to_decision_list)
+from .scanner import load_library, refresh, summarize
+from .sync.apply import plan_audio_sync, split_discontinuous, sync_group_audio
+from .sync.config import SyncConfig
+from .sync.manual import align_manual, source_times_at
+from .sync.metadata import metadata_hint
+from .sync.sources import FileSource
+from .sync.visual import VisualCandidate, accept_candidate, luma_series, propose_visual_sync
+from .timeline import (AddGroup, Session, execute, Transaction, TimelineError, accept_angle, from_decision_list, lock_angle,
+                       nudge_angle, op_from_dict, to_decision_list)
 from .versions import import_version, load_version
 
 
@@ -164,6 +170,12 @@ def cmd_tl_show(args) -> int:
             lock = " 🔒" if c.locked else ""
             print(f"  {c.id}{lock} {c.start:>6}-{c.end:<6} {c.media} @ {c.src_in:.2f}s"
                   + (f"  — {c.note}" if c.note else ""))
+    for g in tl.groups:
+        print(f"groupe multicam {g.id} « {g.name} » (maître {g.master})")
+        for a in g.angles:
+            lock = " 🔒" if a.locked else ""
+            print(f"  {a.id}{lock} [{a.status}/{a.method}, confiance {a.confidence:.2f}] décalage {a.offset:+.3f} s, "
+                  f"dérive {a.drift_ppm:+.1f} ppm — {a.media}" + (f" — {a.note}" if a.note else ""))
     for m in tl.markers:
         print(f"repère {m.id} ({m.kind}) image {m.frame} {m.text}")
     print(f"Historique : {len(s.history())} action(s) annulable(s)")
@@ -179,6 +191,158 @@ def cmd_tl_apply(args) -> int:
     label = data.get("label", "") if isinstance(data, dict) else ""
     for line in s.do(Transaction(ops, label), label):
         print(line)
+    return 0
+
+
+def _split_pair(spec: str) -> tuple[str, str]:
+    if "=" not in spec:
+        raise TimelineError(f"« {spec} » : attendu ID=chemin/relatif/au/mariage")
+    k, v = spec.split("=", 1)
+    return k.strip(), v.strip().replace("\\", "/")
+
+
+def cmd_mc_create(args) -> int:
+    from .probe import probe
+    project = _project(args)
+    s = _session(project)
+    master_id, master_path = _split_pair(args.master)
+    angles = []
+    for spec in [args.master] + list(args.angle or []):
+        aid, rel = _split_pair(spec)
+        path = project.resolve(rel)
+        if not path.is_file():
+            raise TimelineError(f"fichier introuvable : {rel}")
+        info = probe(path)
+        is_video = bool(info.vcodec)
+        angles.append({"id": aid, "media": rel, "kind": "video" if is_video else "audio", "has_audio": info.has_audio,
+                       **({"status": "reference", "method": "reference", "confidence": 1.0} if aid == master_id else {})})
+    gid = s.tl.next_group_id()
+    for line in s.do(AddGroup({"id": gid, "master": master_id, "name": args.name or "", "angles": angles})):
+        print(line)
+    for a in angles:
+        print(f"  {a['id']}: {a['media']} ({a['kind']}, {'avec' if a['has_audio'] else 'SANS'} audio)")
+    return 0
+
+
+def _visual_ref(tl, g, ref_id: str | None):
+    cands = [a for a in g.angles if a.kind == "video" and a.usable]
+    if ref_id:
+        a = g.angle(ref_id)
+        if not a.usable:
+            raise TimelineError(f"l'angle de référence {ref_id} n'est pas synchronisé de façon fiable")
+        return a
+    return cands[0] if cands else None
+
+
+def cmd_mc_sync(args) -> int:
+    project = _project(args)
+    s = _session(project)
+    cfg = SyncConfig.load(args.config)
+    g = s.tl.group(args.group)
+    cancel = CancelToken()
+    sources = {}
+    starts = {}
+    try:
+        lib = {f.path: f for f in load_library(project)}
+    except FileNotFoundError:
+        lib = {}                                   # pas d'inventaire : pas d'indice d'horodatage, rien d'autre ne change
+    for a in g.angles:
+        if a.has_audio:
+            sources[a.id] = FileSource(project.resolve(a.media), cfg.rate, cancel, project.tmp_dir)
+        if a.media in lib:
+            starts[a.id] = lib[a.media].start
+    hints = {}
+    for a in g.angles:
+        if a.id != g.master and not args.no_hint:
+            h = metadata_hint(starts.get(g.master), starts.get(a.id), cfg, g.angle(g.master).offset)
+            if h:
+                hints[a.id] = h
+    try:
+        estimates = sync_group_audio(s.tl, g.id, sources, cfg, hints, cancel)
+    except KeyboardInterrupt:
+        print("\nAnnulé.")
+        return 130
+    for aid, est in estimates.items():
+        print(f"{aid}: {est.status} (confiance {est.confidence:.2f}, {est.elapsed_s:.1f} s) "
+              f"décalage {est.offset:+.3f} s, dérive {est.drift_ppm:+.1f} ppm"
+              + ("" if est.drift_measured else " (non mesurée)"))
+        for n in est.notes:
+            print(f"    - {n}")
+    report = plan_audio_sync(s.tl, g.id, estimates, overwrite_manual=args.overwrite_manual)
+    for line in report.lines:
+        print(line)
+    work = s.tl.copy()                              # état « après synchro » : sert de base à la proposition visuelle
+    if report.op is not None:
+        execute(work, report.op)
+    if args.dry_run:
+        print("(simulation : rien n'a été enregistré)")
+    elif report.op is not None:
+        s.do(report.op, f"synchro audio {g.id}")
+        print("Synchro enregistrée (annulable avec timeline-undo).")
+    # drone / angles sans audio : propositions visuelles, jamais appliquées sans --accept-visual
+    silent = [a for a in g.angles if not a.has_audio and a.kind == "video" and not a.locked]
+    for a in silent:
+        ref = _visual_ref(work, work.group(g.id), args.visual_ref)
+        if ref is None:
+            print(f"{a.id} (sans audio) : aucun angle vidéo synchronisé pour servir de référence visuelle "
+                  "(synchroniser d'abord une caméra avec son, ou --visual-ref)")
+            continue
+        r = propose_visual_sync(luma_series(project.resolve(ref.media), cfg, cancel, project.tmp_dir),
+                                luma_series(project.resolve(a.media), cfg, cancel, project.tmp_dir), cfg)
+        print(f"{a.id} (sans audio) — synchro visuelle EXPÉRIMENTALE : {r.status} ; "
+              f"{r.events_ref} événement(s) côté {ref.id}, {r.events_sig} côté {a.id}")
+        for n in r.notes:
+            print(f"    - {n}")
+        converted = []
+        for c in r.candidates:
+            off_group = ref.offset + c.offset * (1.0 + ref.drift_ppm * 1e-6)
+            conv = VisualCandidate(off_group, c.confidence, c.score, c.psr, c.matched_events, c.rank, c.coincidence_risk)
+            converted.append(conv)
+            print(f"    #{c.rank}: décalage {off_group:+.3f} s, confiance {c.confidence:.2f}, "
+                  f"{c.matched_events} événement(s), risque de coïncidence {c.coincidence_risk:.3f}")
+        if args.accept_visual and a.id == (args.visual_angle or a.id):
+            if not 1 <= args.accept_visual <= len(converted):
+                raise TimelineError(f"candidat #{args.accept_visual} inexistant")
+            s.do(accept_candidate(s.tl, g.id, a.id, converted[args.accept_visual - 1]))
+            print(f"Proposition #{args.accept_visual} posée sur {a.id} (état « incertain », à valider : "
+                  "multicam-accept, ou régler image par image : multicam-nudge)")
+    return 0
+
+
+def cmd_mc_align(args) -> int:
+    s = _session(_project(args))
+    pts = [[float(a), float(b)] for a, b in args.point]
+    for line in s.do(align_manual(s.tl, args.group, args.angle, pts, args.snap)):
+        print(line)
+    return 0
+
+
+def cmd_mc_nudge(args) -> int:
+    s = _session(_project(args))
+    for line in s.do(nudge_angle(s.tl, args.group, args.angle, args.frames)):
+        print(line)
+    return 0
+
+
+def cmd_mc_lock(args) -> int:
+    s = _session(_project(args))
+    for line in s.do(lock_angle(s.tl, args.group, args.angle, not args.unlock)):
+        print(line)
+    return 0
+
+
+def cmd_mc_accept(args) -> int:
+    s = _session(_project(args))
+    for line in s.do(accept_angle(s.tl, args.group, args.angle)):
+        print(line)
+    return 0
+
+
+def cmd_mc_at(args) -> int:
+    s = _session(_project(args))
+    for aid, t in source_times_at(s.tl, args.group, args.time).items():
+        a = s.tl.group(args.group).angle(aid)
+        print(f"{aid}: {'hors plage' if t is None else f'{t:.3f} s'}  ({a.media})")
     return 0
 
 
@@ -232,6 +396,21 @@ def cmd_clean_cache(args) -> int:
     project = _project(args)
     print(f"Cache de segments vidé : {clean_cache(project)} Mo libérés (rushes et rendus intacts)")
     return 0
+
+
+def cmd_sync_calibrate(args) -> int:
+    from .sync import calibrate as cal
+    cfg = SyncConfig.load(args.config)
+    root = cal.resolve_root(args.root, args.root_map)
+    opts = cal.Options(root=root, out=Path(args.out), scenario=args.scenario, audio_dirs=args.audio_dir,
+                       video_dirs=args.video_dir, dry_run=args.dry_run, inventory_only=args.inventory_only,
+                       with_hint=args.with_hint, visual=not args.no_visual, max_pairs=args.max_pairs,
+                       clock_tol_s=args.clock_tol, max_video_seconds=args.max_video_seconds, inventory_limit=args.limit,
+                       only=args.only, truth=Path(args.truth) if args.truth else None, cfg=cfg, tz=args.tz)
+    res = cal.run(opts)
+    print(f"\nRapport : {res['out'] / 'report.md'}")
+    print("Originaux inchangés : " + ("oui" if res["unchanged"] else "NON : " + ", ".join(res["changed"])))
+    return 0 if res["unchanged"] else 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -294,6 +473,38 @@ def build_parser() -> argparse.ArgumentParser:
     add("timeline-show", "Affiche la timeline courante", cmd_tl_show)
     s = add("timeline-apply", "Applique un fichier JSON d'opérations (une action annulable)", cmd_tl_apply)
     s.add_argument("file")
+    s = add("multicam-create", "Crée un groupe multicam (maître audio + angles)", cmd_mc_create)
+    s.add_argument("--master", required=True, help="ID=chemin du fichier qui sert d'audio de référence")
+    s.add_argument("--angle", action="append", help="ID=chemin (répétable)")
+    s.add_argument("--name")
+    s = add("multicam-sync", "Synchronise les angles (audio, dérive ; propositions visuelles pour le drone muet)", cmd_mc_sync)
+    s.add_argument("group")
+    s.add_argument("--config", help="réglages JSON (seuils de confiance, fenêtres…)")
+    s.add_argument("--dry-run", action="store_true", help="calcule et affiche sans rien enregistrer")
+    s.add_argument("--no-hint", action="store_true", help="ignore l'indice des horodatages de fichiers")
+    s.add_argument("--overwrite-manual", action="store_true", help="autorise à écraser un réglage manuel")
+    s.add_argument("--visual-ref", help="angle vidéo de référence pour la synchro visuelle")
+    s.add_argument("--accept-visual", type=int, help="pose la proposition visuelle n° N (état « incertain »)")
+    s.add_argument("--visual-angle", help="limite --accept-visual à cet angle")
+    s = add("multicam-align", "Alignement manuel par repères (1 repère = décalage, 2 = dérive)", cmd_mc_align)
+    s.add_argument("group")
+    s.add_argument("angle")
+    s.add_argument("--point", nargs=2, type=float, action="append", required=True, metavar=("T_ANGLE", "T_GROUPE"))
+    s.add_argument("--snap", action="store_true", help="arrondit le décalage à l'image")
+    s = add("multicam-nudge", "Décale un angle image par image (+/-)", cmd_mc_nudge)
+    s.add_argument("group")
+    s.add_argument("angle")
+    s.add_argument("frames", type=int)
+    s = add("multicam-lock", "Verrouille (ou déverrouille) la synchro d'un angle", cmd_mc_lock)
+    s.add_argument("group")
+    s.add_argument("angle")
+    s.add_argument("--unlock", action="store_true")
+    s = add("multicam-accept", "Valide humainement une synchro incertaine ou visuelle", cmd_mc_accept)
+    s.add_argument("group")
+    s.add_argument("angle")
+    s = add("multicam-at", "Instants source de chaque angle à un instant de groupe (pour l'alignement côte à côte)", cmd_mc_at)
+    s.add_argument("group")
+    s.add_argument("time", type=float)
     add("timeline-undo", "Annule la dernière action", cmd_tl_undo)
     add("timeline-redo", "Rétablit la dernière action annulée", cmd_tl_redo)
     s = add("timeline-export", "Exporte la timeline en liste de décisions", cmd_tl_export)
@@ -301,6 +512,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true")
     s = add("timeline-render", "Rend la timeline courante en MP4", cmd_tl_render)
     s.add_argument("--final", action="store_true")
+
+    s = sub.add_parser("sync-calibrate", help="Mesure la synchro sur de vrais rushes (LECTURE SEULE, rapport dans --out)")
+    s.add_argument("root", help="dossier du mariage, chemin Windows accepté (G:\\Mon Drive\\KOLNOA\\MARIAGE …)")
+    s.add_argument("--out", required=True, help="dossier du rapport (jamais dans les rushes)")
+    s.add_argument("--scenario", default="mairie", help="mairie | jeremy | clip | custom (avec --audio-dir/--video-dir)")
+    s.add_argument("--audio-dir", action="append", default=[], help="dossier audio relatif (le premier = enregistreur de référence)")
+    s.add_argument("--video-dir", action="append", default=[], help="dossier vidéo relatif (le premier = caméra de référence)")
+    s.add_argument("--root-map", action="append", default=[], metavar="CHEMIN_WINDOWS=CHEMIN_LOCAL",
+                   help="correspondance quand le dossier est monté ailleurs (non Windows)")
+    s.add_argument("--dry-run", action="store_true", help="inventaire + plan seulement : aucun média n'est décodé")
+    s.add_argument("--inventory-only", action="store_true", help="inventaire (avec test de silence audio) sans synchro")
+    s.add_argument("--no-visual", action="store_true")
+    s.add_argument("--with-hint", action="store_true", help="relance aussi chaque paire audio avec l'indice des horodatages")
+    s.add_argument("--max-pairs", type=int, default=12)
+    s.add_argument("--clock-tol", type=float, default=7200.0, help="écart d'horloge toléré entre appareils pour choisir les paires (s)")
+    s.add_argument("--max-video-seconds", type=float, default=300.0, help="durée analysée de chaque vidéo (synchro visuelle)")
+    s.add_argument("--only", action="append", default=[], help="ne garder que les fichiers dont le chemin contient ce texte")
+    s.add_argument("--limit", type=int, help="nombre maximal de fichiers inventoriés par dossier")
+    s.add_argument("--config", help="réglages de synchro JSON")
+    s.add_argument("--truth", help="JSON de repères posés à la main : [{ref, sig, t_ref, t_sig}]")
+    s.add_argument("--tz", default="Europe/Paris", help="fuseau des noms de fichiers horodatés")
+    s.set_defaults(func=cmd_sync_calibrate)
 
     add("clean-cache", "Vide le cache de segments (jamais les rushes ni les rendus)", cmd_clean_cache)
     return p

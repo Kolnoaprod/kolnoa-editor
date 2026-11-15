@@ -15,8 +15,12 @@ from typing import Any
 
 SCHEMA = 1
 TRACK_KINDS = {"video", "audio"}
-AUDIO_MODES = {"source", "mute"}
+AUDIO_MODES = {"source", "mute", "group"}   # group = audio maître du groupe multicam
 MARKER_KINDS = {"note", "beat", "phrase", "sync", "chapter", "keep"}  # keep = zone à ne pas couper
+SYNC_STATUSES = {"unsynced", "reference", "ok", "incertain", "discontinu", "impossible", "manual"}
+SYNC_METHODS = {"none", "reference", "audio", "visual", "metadata", "manual"}
+USABLE_STATUSES = {"reference", "ok", "manual"}     # seuls états utilisables sans validation humaine supplémentaire
+_GROUP_ID = re.compile(r"^g(\d+)$")
 _CLIP_ID = re.compile(r"^s(\d+)$")
 _MARKER_ID = re.compile(r"^m(\d+)$")
 
@@ -55,6 +59,8 @@ class Clip:
     label: str = ""
     locked: bool = False
     parent: str | None = None    # filiation (scission)
+    group: str | None = None     # groupe multicam : le plan montre un angle du groupe, son audio vient du maître
+    angle: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)  # réservé (transitions, effets, étalonnage)
 
     @property
@@ -71,6 +77,49 @@ class Marker:
 
 
 @dataclass
+class Angle:
+    """Une prise (caméra, drone, enregistreur) d'un groupe multicam, placée sur l'axe de temps commun :
+    t_groupe = offset + t_angle × (1 + drift_ppm × 1e-6)."""
+    id: str
+    media: str
+    kind: str = "video"              # 'video' | 'audio'
+    has_audio: bool = True
+    offset: float = 0.0              # secondes
+    drift_ppm: float = 0.0
+    confidence: float = 0.0          # 0..1, issu du calcul ; 1.0 = décidé par l'humain
+    status: str = "unsynced"
+    method: str = "none"
+    locked: bool = False             # offset/dérive protégés : ni synchro automatique ni réglage ne les touchent
+    points: list = field(default_factory=list)   # repères manuels [[t_angle, t_groupe], ...]
+    range: list | None = None        # [début, fin] en secondes de l'angle où ce décalage vaut (clips discontinus)
+    note: str = ""
+
+    def to_group(self, t_angle: float) -> float:
+        return self.offset + t_angle * (1.0 + self.drift_ppm * 1e-6)
+
+    def to_angle(self, t_group: float) -> float:
+        return (t_group - self.offset) / (1.0 + self.drift_ppm * 1e-6)
+
+    @property
+    def usable(self) -> bool:
+        return self.status in USABLE_STATUSES
+
+
+@dataclass
+class MulticamGroup:
+    id: str
+    master: str                      # id de l'angle dont l'audio sert de référence (axe du groupe)
+    name: str = ""
+    angles: list[Angle] = field(default_factory=list)
+
+    def angle(self, angle_id: str) -> Angle:
+        for a in self.angles:
+            if a.id == angle_id:
+                return a
+        raise TimelineError(f"Angle inconnu : {angle_id}")
+
+
+@dataclass
 class Timeline:
     title: str
     version: int = 1
@@ -81,6 +130,7 @@ class Timeline:
     tracks: list[Track] = field(default_factory=list)
     clips: list[Clip] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
+    groups: list[MulticamGroup] = field(default_factory=list)
     retired: list[str] = field(default_factory=list)
     schema: int = SCHEMA
 
@@ -102,6 +152,26 @@ class Timeline:
             if m.id == marker_id:
                 return m
         raise TimelineError(f"Repère inconnu : {marker_id}")
+
+    def group(self, group_id: str) -> MulticamGroup:
+        for g in self.groups:
+            if g.id == group_id:
+                return g
+        raise TimelineError(f"Groupe multicam inconnu : {group_id}")
+
+    def next_group_id(self) -> str:
+        nums = [int(m.group(1)) for g in self.groups if (m := _GROUP_ID.match(g.id))]
+        return f"g{max(nums, default=0) + 1:03d}"
+
+    def group(self, group_id: str) -> MulticamGroup:
+        for g in self.groups:
+            if g.id == group_id:
+                return g
+        raise TimelineError(f"Groupe multicam inconnu : {group_id}")
+
+    def next_group_id(self) -> str:
+        nums = [int(m.group(1)) for g in self.groups if (m := _GROUP_ID.match(g.id))]
+        return f"g{max(nums, default=0) + 1:03d}"
 
     def clips_on(self, track_id: str) -> list[Clip]:
         return sorted((c for c in self.clips if c.track == track_id), key=lambda c: c.start)
@@ -176,6 +246,7 @@ class Timeline:
                 if prev is not None and c.start < prev.end:
                     raise TimelineError(f"chevauchement sur {tid} : {prev.id} et {c.id}")
                 prev = c
+        self._validate_groups()
         mseen: set[str] = set()
         for m in self.markers:
             if m.id in mseen:
@@ -183,6 +254,43 @@ class Timeline:
             mseen.add(m.id)
             if m.frame < 0 or m.kind not in MARKER_KINDS:
                 raise TimelineError(f"{m.id}: repère invalide")
+
+    def _validate_groups(self) -> None:
+        gseen: set[str] = set()
+        for g in self.groups:
+            if not g.id or g.id in gseen:
+                raise TimelineError(f"id de groupe vide ou en double : {g.id!r}")
+            gseen.add(g.id)
+            ids = [a.id for a in g.angles]
+            if len(ids) != len(set(ids)) or not all(ids):
+                raise TimelineError(f"{g.id}: ids d'angles vides ou en double")
+            if g.master not in ids:
+                raise TimelineError(f"{g.id}: l'angle maître {g.master!r} n'existe pas")
+            if not g.angle(g.master).has_audio:
+                raise TimelineError(f"{g.id}: l'angle maître doit avoir de l'audio")
+            for a in g.angles:
+                if a.kind not in ("video", "audio"):
+                    raise TimelineError(f"{g.id}/{a.id}: type d'angle invalide {a.kind!r}")
+                if a.status not in SYNC_STATUSES or a.method not in SYNC_METHODS:
+                    raise TimelineError(f"{g.id}/{a.id}: statut ou méthode de synchro inconnus "
+                                        f"({a.status!r}, {a.method!r})")
+                if not (0.0 <= a.confidence <= 1.0) or abs(a.drift_ppm) > 100000:
+                    raise TimelineError(f"{g.id}/{a.id}: confiance ou dérive hors limites")
+                if a.range is not None and (len(a.range) != 2 or a.range[0] < 0 or a.range[1] <= a.range[0]):
+                    raise TimelineError(f"{g.id}/{a.id}: plage de validité invalide {a.range!r}")
+                for p in a.points:
+                    if len(p) != 2:
+                        raise TimelineError(f"{g.id}/{a.id}: repère manuel mal formé {p!r}")
+        for c in self.clips:
+            if c.audio == "group" and not c.group:
+                raise TimelineError(f"{c.id}: audio 'group' sans groupe multicam")
+            if c.group:
+                try:
+                    angle = self.group(c.group).angle(c.angle or "")
+                except TimelineError:
+                    raise TimelineError(f"{c.id}: groupe/angle inconnu ({c.group}/{c.angle})") from None
+                if c.media != angle.media:
+                    raise TimelineError(f"{c.id}: média {c.media!r} différent de celui de l'angle {angle.id}")
 
     # --- (dé)sérialisation ---------------------------------------------
     def copy(self) -> "Timeline":
@@ -198,6 +306,7 @@ class Timeline:
         d = self.to_dict()
         d["clips"] = sorted(d["clips"], key=lambda c: (c["track"], c["start"], c["id"]))
         d["markers"] = sorted(d["markers"], key=lambda m: (m["frame"], m["id"]))
+        d["groups"] = sorted(d["groups"], key=lambda g: g["id"])
         d["retired"] = sorted(d["retired"])
         return d
 
@@ -213,6 +322,9 @@ class Timeline:
                 tracks=[Track(**t) for t in d.get("tracks", [])],
                 clips=[Clip(**c) for c in d.get("clips", [])],
                 markers=[Marker(**m) for m in d.get("markers", [])],
+                groups=[MulticamGroup(id=g["id"], master=g["master"], name=g.get("name", ""),
+                                      angles=[Angle(**a) for a in g.get("angles", [])])
+                        for g in d.get("groups", [])],
                 retired=list(d.get("retired", [])), schema=int(d["schema"]),
             )
         except (KeyError, TypeError) as exc:
