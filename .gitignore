@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+.env
+# données de projet générées (proxys, rendus) : jamais dans git
+.kolnoa/
+*.mp4
+*.mov
+*.wav
