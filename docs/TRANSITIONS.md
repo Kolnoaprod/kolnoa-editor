@@ -19,6 +19,24 @@ aucune durée n'est figée tant qu'elle n'a pas été vue à l'œil sur un vrai 
 Hors catalogue tant que l'utilisateur ne le demande pas : glissés, whip pan, zoom, glitch, volets.
 Le modèle est conçu pour les accueillir plus tard sans changer le schéma (type de transition = simple texte).
 
+## Manipulation : glisser, étirer, ou le dire (confirmé par l'utilisateur)
+
+Une transition est un **objet posé sur une coupe**, pas un réglage caché :
+
+- **À la souris (PR C)** : on la glisse depuis le catalogue sur une coupe ; on **étire ou raccourcit** ses poignées ;
+  on la **fait glisser** pour qu'elle commence sur la coupe, soit centrée, ou finisse sur la coupe.
+- **Par prompt (PR E)** : « mets 1 seconde de fondu entre ces deux plans », « allonge le flash », « fais finir le
+  fondu sur la coupe » produisent exactement les mêmes opérations que la souris.
+- Ces gestes sont déjà dans le modèle (PR « transitions » empilée sur #5) : `add_transition`, `resize_transition`
+  (en secondes **ou** en images), `slide_transition` (`center` / `start` / `end`), `RemoveTransition`, tous réversibles,
+  verrouillables, journalisés. CLI : `kolnoa timeline-transition $M s001 --type fade --seconds 0.8 --align end`.
+- Durée toujours en images entières, plafonnée à la moitié du plus court des deux plans (message clair sinon) ;
+  la transition **ne change jamais la durée du film**.
+- Une coupe sous transition ne se déplace pas par accident : modifier les plans voisins est refusé tant que la
+  transition n'est pas retirée (ou ajustée dans la même action). Supprimer un plan emporte ses transitions, l'annulation les rend.
+- Le **rendu** de ces transitions (xfade, flash, poignées de média nécessaires de part et d'autre de la coupe) reste
+  en PR D ; `timeline-render` les signale aujourd'hui comme non rendues plutôt que de les ignorer en silence.
+
 ## Réalisation technique avec ffmpeg 6.1 (vérifié)
 
 - Fondus : `xfade` (`fade`, `fadeblack`, `fadewhite`) + `acrossfade` pour que le son ne claque pas.

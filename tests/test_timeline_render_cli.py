@@ -92,3 +92,21 @@ def test_cli_force_import_keeps_the_old_timeline(mariage, tmp_path):
     assert main(["timeline-import", root, str(dl_file), "--force"]) == 0
     olds = list(Project(mariage).data.glob("timeline.old-*"))
     assert len(olds) == 1 and (olds[0] / "base.json").exists()
+
+
+def test_cli_transition_add_resize_slide_remove_undo(mariage, tmp_path, capsys):
+    dl_file = tmp_path / "v1.json"
+    make_dl().save(dl_file)
+    root = str(mariage)
+    main(["timeline-import", root, str(dl_file)])
+    assert main(["timeline-transition", root, "s001", "--type", "fade", "--seconds", "0.5"]) == 0
+    assert main(["timeline-transition", root, "s001", "--seconds", "0.7"]) == 0          # étirer
+    assert main(["timeline-transition", root, "s001", "--align", "end"]) == 0           # faire glisser
+    capsys.readouterr()
+    main(["timeline-show", root])
+    assert "transition t001 (fade, 18 i = 0.72 s, end) s001 → s002" in capsys.readouterr().out
+    assert main(["timeline-transition", root, "s001", "--seconds", "9"]) == 2           # trop long : refusé
+    assert main(["timeline-transition", root, "s003", "--seconds", "0.5"]) == 2         # pas de coupe après
+    assert main(["timeline-transition", root, "s001", "--remove"]) == 0
+    assert main(["timeline-undo", root]) == 0
+    assert Session.open(Project(mariage).timeline_dir).tl.transitions[0].duration == 18

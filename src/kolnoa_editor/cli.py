@@ -16,8 +16,8 @@ from .project import Project
 from .proxies import build_proxies
 from .renderer import RenderError, clean_cache, render
 from .scanner import refresh, summarize
-from .timeline import (Session, Transaction, TimelineError, from_decision_list, op_from_dict,
-                       to_decision_list)
+from .timeline import (RemoveTransition, Session, Transaction, TimelineError, add_transition, from_decision_list,
+                       op_from_dict, resize_transition, slide_transition, to_decision_list)
 from .versions import import_version, load_version
 
 
@@ -164,6 +164,10 @@ def cmd_tl_show(args) -> int:
             lock = " 🔒" if c.locked else ""
             print(f"  {c.id}{lock} {c.start:>6}-{c.end:<6} {c.media} @ {c.src_in:.2f}s"
                   + (f"  — {c.note}" if c.note else ""))
+    for t in tl.transitions:
+        w0, w1 = tl.window(t)
+        print(f"transition {t.id} ({t.type}, {t.duration} i = {t.duration / tl.fps:.2f} s, {t.align}) "
+              f"{t.from_clip} → {t.to_clip}, images {w0}-{w1}")
     for m in tl.markers:
         print(f"repère {m.id} ({m.kind}) image {m.frame} {m.text}")
     print(f"Historique : {len(s.history())} action(s) annulable(s)")
@@ -179,6 +183,38 @@ def cmd_tl_apply(args) -> int:
     label = data.get("label", "") if isinstance(data, dict) else ""
     for line in s.do(Transaction(ops, label), label):
         print(line)
+    return 0
+
+
+def cmd_tl_transition(args) -> int:
+    """Pose, étire, fait glisser ou retire la transition de la coupe qui suit le plan donné."""
+    s = _session(_project(args))
+    tl = s.tl
+    a = tl.clip(args.clip)
+    nxt = next((c for c in tl.clips_on(a.track) if c.start == a.end), None)
+    existing = tl.transition_at(a.id, nxt.id) if nxt else None
+    if args.remove:
+        if existing is None:
+            raise TimelineError(f"aucune transition après {args.clip}")
+        lines = s.do(RemoveTransition(existing.id))
+    elif existing is None:
+        if args.seconds is None and args.frames is None:
+            raise TimelineError("donner une durée : --seconds ou --frames")
+        lines = s.do(add_transition(tl, a.id, args.type or "fade", seconds=args.seconds, frames=args.frames,
+                                    align=args.align or "center"))
+    else:
+        ops = []
+        if args.seconds is not None or args.frames is not None:
+            ops.append(resize_transition(tl, existing.id, seconds=args.seconds, frames=args.frames))
+        if args.align:
+            ops.append(slide_transition(tl, existing.id, args.align))
+        if args.type:
+            from .timeline import SetTransition
+            ops.append(SetTransition(existing.id, {"type": args.type}))
+        if not ops:
+            raise TimelineError("rien à changer : --seconds, --frames, --align, --type ou --remove")
+        lines = s.do(Transaction(ops, f"transition {existing.id}"))
+    print("\n".join(lines))
     return 0
 
 
@@ -294,6 +330,13 @@ def build_parser() -> argparse.ArgumentParser:
     add("timeline-show", "Affiche la timeline courante", cmd_tl_show)
     s = add("timeline-apply", "Applique un fichier JSON d'opérations (une action annulable)", cmd_tl_apply)
     s.add_argument("file")
+    s = add("timeline-transition", "Pose / étire / fait glisser / retire la transition après un plan", cmd_tl_transition)
+    s.add_argument("clip", help="plan avant la coupe (ex. s001)")
+    s.add_argument("--type", choices=["fade", "fadeblack", "fadewhite", "flash"])
+    s.add_argument("--seconds", type=float)
+    s.add_argument("--frames", type=int)
+    s.add_argument("--align", choices=["center", "start", "end"])
+    s.add_argument("--remove", action="store_true")
     add("timeline-undo", "Annule la dernière action", cmd_tl_undo)
     add("timeline-redo", "Rétablit la dernière action annulée", cmd_tl_redo)
     s = add("timeline-export", "Exporte la timeline en liste de décisions", cmd_tl_export)

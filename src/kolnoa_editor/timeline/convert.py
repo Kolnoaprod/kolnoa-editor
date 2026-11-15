@@ -66,6 +66,9 @@ def to_decision_list(tl: Timeline) -> tuple[DecisionList, list[str]]:
         end = round(c.src_in + frames_to_seconds(c.duration, tl.fps), 6)
         segments.append(Segment(id=c.id, clip=c.media, start=c.src_in, end=end, audio=c.audio,
                                 fade_in=c.fade_in, fade_out=c.fade_out, note=c.note, parent=c.parent))
+    if tl.transitions:
+        warnings.append(f"{len(tl.transitions)} transition(s) non exportée(s) en liste de décisions "
+                        "(rendues à partir de la PR D)")
     if tl.markers:
         warnings.append(f"{len(tl.markers)} repère(s) non exporté(s) (sans effet sur le rendu)")
     dl = DecisionList(title=tl.title, version=tl.version, fps=tl.fps, resolution=tuple(tl.resolution),
