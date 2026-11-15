@@ -2,7 +2,7 @@
 
 Montage de films de mariage assisté par IA (Claude et ChatGPT), pensé pour tourner sur le Shadow PC (Windows + GPU). Objectif : un logiciel de montage principal, avec un premier montage automatique puis des finitions à la souris ou en langage naturel.
 
-Feuille de route : issues [#1](https://github.com/Kolnoaprod/kolnoa-editor/issues/1) et [#2](https://github.com/Kolnoaprod/kolnoa-editor/issues/2). Architecture : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Audit du socle : [docs/AUDIT.md](docs/AUDIT.md).
+Feuille de route : issues [#1](https://github.com/Kolnoaprod/kolnoa-editor/issues/1) et [#2](https://github.com/Kolnoaprod/kolnoa-editor/issues/2). Architecture : [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (socle actuel), [docs/ARCHITECTURE_V2.md](docs/ARCHITECTURE_V2.md) (timeline hybride, multicam, synchro : proposition à valider). Audit du socle : [docs/AUDIT.md](docs/AUDIT.md).
 
 ## Principe
 
