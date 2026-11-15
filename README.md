@@ -46,6 +46,14 @@ kolnoa diff $M 1 2                   # avant/après entre deux versions
 kolnoa comment $M v001.json 133.4 "couper plus tôt"
 kolnoa feedback $M v001.json         # texte des retours ouverts à donner à l'IA
 kolnoa clean-cache $M                # vide le cache de segments (jamais les rushes ni les rendus)
+
+# Timeline éditable (voir docs/TIMELINE.md)
+kolnoa timeline-import $M v001.json  # crée la timeline depuis une liste de décisions (n'écrase jamais)
+kolnoa timeline-show $M              # pistes, plans, repères, historique
+kolnoa timeline-apply $M ops.json    # applique des opérations JSON en UNE action annulable
+kolnoa timeline-undo $M ; kolnoa timeline-redo $M
+kolnoa timeline-export $M v002.json  # retour vers une liste de décisions
+kolnoa timeline-render $M --final    # rendu de la timeline courante
 ```
 
 Journal détaillé : `<données>\logs\kolnoa.log`.
@@ -59,7 +67,7 @@ Journal détaillé : `<données>\logs\kolnoa.log`.
 | Validation avant rendu (`check`) | fait (PR 1) |
 | Rendu atomique, annulable, avec cache et reprise ; raccords exacts à l'image | fait (PR 1) |
 | Filiation des ids de segments, versions, retours reportés, diff | fait (PR 1) |
-| Timeline native, opérations réversibles | à faire (PR A) |
+| Timeline native, opérations réversibles, annuler/rétablir persistants, passerelle liste de décisions | fait (PR A) |
 | Multicam, synchro audio / visuelle / manuelle | à faire (PR B) |
 | Interface timeline, lecteur proxy | à faire (PR C) |
 | Effets, LUTs, transitions, musique, mixage | à faire (PR D) |
