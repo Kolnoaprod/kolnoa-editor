@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -15,6 +16,8 @@ from .project import Project
 from .proxies import build_proxies
 from .renderer import RenderError, clean_cache, render
 from .scanner import refresh, summarize
+from .timeline import (Session, Transaction, TimelineError, from_decision_list, op_from_dict,
+                       to_decision_list)
 from .versions import import_version, load_version
 
 
@@ -131,6 +134,92 @@ def cmd_import(args) -> int:
     return 0
 
 
+def _session(project: Project) -> Session:
+    return Session.open(project.timeline_dir)
+
+
+def cmd_tl_import(args) -> int:
+    project = _project(args)
+    dl = DecisionList.load(Path(args.file))
+    dl.validate(project)
+    if (project.timeline_dir / "base.json").exists():
+        if not args.force:
+            raise TimelineError("Une timeline existe déjà (--force la met de côté et en crée une nouvelle)")
+        backup = project.quarantine_dir(project.timeline_dir)
+        print(f"Ancienne timeline conservée : {backup}")
+    s = Session.create(project.timeline_dir, from_decision_list(dl))
+    print(f"Timeline créée : {len(s.tl.clips)} plan(s), {s.tl.end_frame} images ({s.tl.duration:.1f} s)")
+    return 0
+
+
+def cmd_tl_show(args) -> int:
+    s = _session(_project(args))
+    tl = s.tl
+    print(f"« {tl.title} » v{tl.version} — {tl.fps} i/s, {tl.resolution[0]}x{tl.resolution[1]}, "
+          f"{tl.end_frame} images ({tl.duration:.1f} s)")
+    for t in tl.tracks:
+        flags = " [verrouillée]" if t.locked else ""
+        print(f"{t.id} ({t.kind}, {t.role}){flags}")
+        for c in tl.clips_on(t.id):
+            lock = " 🔒" if c.locked else ""
+            print(f"  {c.id}{lock} {c.start:>6}-{c.end:<6} {c.media} @ {c.src_in:.2f}s"
+                  + (f"  — {c.note}" if c.note else ""))
+    for m in tl.markers:
+        print(f"repère {m.id} ({m.kind}) image {m.frame} {m.text}")
+    print(f"Historique : {len(s.history())} action(s) annulable(s)")
+    return 0
+
+
+def cmd_tl_apply(args) -> int:
+    """Applique un fichier JSON d'opérations (liste) comme UNE action annulable."""
+    project = _project(args)
+    s = _session(project)
+    data = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    ops = [op_from_dict(o) for o in (data["ops"] if isinstance(data, dict) else data)]
+    label = data.get("label", "") if isinstance(data, dict) else ""
+    for line in s.do(Transaction(ops, label), label):
+        print(line)
+    return 0
+
+
+def cmd_tl_undo(args) -> int:
+    print(f"Annulé : {_session(_project(args)).undo()}")
+    return 0
+
+
+def cmd_tl_redo(args) -> int:
+    print(f"Rétabli : {_session(_project(args)).redo()}")
+    return 0
+
+
+def cmd_tl_export(args) -> int:
+    project = _project(args)
+    dl, warnings = to_decision_list(_session(project).tl)
+    dl.validate(project)
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        raise TimelineError(f"{out} existe déjà (--force pour remplacer)")
+    dl.save(out)
+    print(f"Liste de décisions écrite : {out}")
+    for w in warnings:
+        print(f"ATTENTION : {w}", file=sys.stderr)
+    return 0
+
+
+def cmd_tl_render(args) -> int:
+    project = _project(args)
+    dl, warnings = to_decision_list(_session(project).tl)
+    for w in warnings:
+        print(f"ATTENTION : {w}", file=sys.stderr)
+    try:
+        out = render(project, dl, "final" if args.final else "proxy", on_progress=_progress, cancel=CancelToken())
+    except (KeyboardInterrupt, Cancelled):
+        print("\nAnnulé. Les segments déjà encodés sont gardés : relance pour reprendre.")
+        return 130
+    print(f"Rendu : {out}")
+    return 0
+
+
 def cmd_diff(args) -> int:
     project = _project(args)
     a, b = load_version(project, args.old), load_version(project, args.new)
@@ -199,6 +288,20 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("old", type=int)
     s.add_argument("new", type=int)
 
+    s = add("timeline-import", "Crée la timeline éditable depuis une liste de décisions", cmd_tl_import)
+    s.add_argument("file")
+    s.add_argument("--force", action="store_true", help="met l'ancienne timeline de côté (jamais supprimée)")
+    add("timeline-show", "Affiche la timeline courante", cmd_tl_show)
+    s = add("timeline-apply", "Applique un fichier JSON d'opérations (une action annulable)", cmd_tl_apply)
+    s.add_argument("file")
+    add("timeline-undo", "Annule la dernière action", cmd_tl_undo)
+    add("timeline-redo", "Rétablit la dernière action annulée", cmd_tl_redo)
+    s = add("timeline-export", "Exporte la timeline en liste de décisions", cmd_tl_export)
+    s.add_argument("out")
+    s.add_argument("--force", action="store_true")
+    s = add("timeline-render", "Rend la timeline courante en MP4", cmd_tl_render)
+    s.add_argument("--final", action="store_true")
+
     add("clean-cache", "Vide le cache de segments (jamais les rushes ni les rendus)", cmd_clean_cache)
     return p
 
@@ -210,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     except PreflightError as exc:
         print(f"Erreur : {exc}", file=sys.stderr)
         return 2
-    except (DecisionListError, FileNotFoundError, ValueError, RenderError, FFmpegError) as exc:
+    except (DecisionListError, TimelineError, FileNotFoundError, ValueError, RenderError, FFmpegError) as exc:
         print(f"Erreur : {exc}", file=sys.stderr)
         return 2
 

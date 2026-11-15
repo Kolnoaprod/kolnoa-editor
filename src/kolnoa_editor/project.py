@@ -51,6 +51,10 @@ class Project:
         return self.data / "comments"
 
     @property
+    def timeline_dir(self) -> Path:
+        return self.data / "timeline"
+
+    @property
     def renders_dir(self) -> Path:
         return self.data / "renders"
 
@@ -123,6 +127,13 @@ class Project:
     def quarantine(path: Path) -> Path:
         """Met de côté un fichier illisible au lieu de l'écraser."""
         target = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+        os.replace(path, target)
+        return target
+
+    @staticmethod
+    def quarantine_dir(path: Path) -> Path:
+        """Met un dossier de côté (renommé, jamais supprimé)."""
+        target = path.with_name(f"{path.name}.old-{int(time.time())}")
         os.replace(path, target)
         return target
 
