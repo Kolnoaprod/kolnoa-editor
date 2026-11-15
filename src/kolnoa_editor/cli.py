@@ -296,10 +296,10 @@ def cmd_mc_sync(args) -> int:
         converted = []
         for c in r.candidates:
             off_group = ref.offset + c.offset * (1.0 + ref.drift_ppm * 1e-6)
-            conv = VisualCandidate(off_group, c.confidence, c.score, c.psr, c.matched_events, c.rank, c.p_chance)
+            conv = VisualCandidate(off_group, c.confidence, c.score, c.psr, c.matched_events, c.rank, c.coincidence_risk)
             converted.append(conv)
             print(f"    #{c.rank}: décalage {off_group:+.3f} s, confiance {c.confidence:.2f}, "
-                  f"{c.matched_events} événement(s), risque de coïncidence {c.p_chance:.3f}")
+                  f"{c.matched_events} événement(s), risque de coïncidence {c.coincidence_risk:.3f}")
         if args.accept_visual and a.id == (args.visual_angle or a.id):
             if not 1 <= args.accept_visual <= len(converted):
                 raise TimelineError(f"candidat #{args.accept_visual} inexistant")
@@ -396,6 +396,21 @@ def cmd_clean_cache(args) -> int:
     project = _project(args)
     print(f"Cache de segments vidé : {clean_cache(project)} Mo libérés (rushes et rendus intacts)")
     return 0
+
+
+def cmd_sync_calibrate(args) -> int:
+    from .sync import calibrate as cal
+    cfg = SyncConfig.load(args.config)
+    root = cal.resolve_root(args.root, args.root_map)
+    opts = cal.Options(root=root, out=Path(args.out), scenario=args.scenario, audio_dirs=args.audio_dir,
+                       video_dirs=args.video_dir, dry_run=args.dry_run, inventory_only=args.inventory_only,
+                       with_hint=args.with_hint, visual=not args.no_visual, max_pairs=args.max_pairs,
+                       clock_tol_s=args.clock_tol, max_video_seconds=args.max_video_seconds, inventory_limit=args.limit,
+                       only=args.only, truth=Path(args.truth) if args.truth else None, cfg=cfg, tz=args.tz)
+    res = cal.run(opts)
+    print(f"\nRapport : {res['out'] / 'report.md'}")
+    print("Originaux inchangés : " + ("oui" if res["unchanged"] else "NON : " + ", ".join(res["changed"])))
+    return 0 if res["unchanged"] else 3
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -497,6 +512,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true")
     s = add("timeline-render", "Rend la timeline courante en MP4", cmd_tl_render)
     s.add_argument("--final", action="store_true")
+
+    s = sub.add_parser("sync-calibrate", help="Mesure la synchro sur de vrais rushes (LECTURE SEULE, rapport dans --out)")
+    s.add_argument("root", help="dossier du mariage, chemin Windows accepté (G:\\Mon Drive\\KOLNOA\\MARIAGE …)")
+    s.add_argument("--out", required=True, help="dossier du rapport (jamais dans les rushes)")
+    s.add_argument("--scenario", default="mairie", help="mairie | jeremy | clip | custom (avec --audio-dir/--video-dir)")
+    s.add_argument("--audio-dir", action="append", default=[], help="dossier audio relatif (le premier = enregistreur de référence)")
+    s.add_argument("--video-dir", action="append", default=[], help="dossier vidéo relatif (le premier = caméra de référence)")
+    s.add_argument("--root-map", action="append", default=[], metavar="CHEMIN_WINDOWS=CHEMIN_LOCAL",
+                   help="correspondance quand le dossier est monté ailleurs (non Windows)")
+    s.add_argument("--dry-run", action="store_true", help="inventaire + plan seulement : aucun média n'est décodé")
+    s.add_argument("--inventory-only", action="store_true", help="inventaire (avec test de silence audio) sans synchro")
+    s.add_argument("--no-visual", action="store_true")
+    s.add_argument("--with-hint", action="store_true", help="relance aussi chaque paire audio avec l'indice des horodatages")
+    s.add_argument("--max-pairs", type=int, default=12)
+    s.add_argument("--clock-tol", type=float, default=7200.0, help="écart d'horloge toléré entre appareils pour choisir les paires (s)")
+    s.add_argument("--max-video-seconds", type=float, default=300.0, help="durée analysée de chaque vidéo (synchro visuelle)")
+    s.add_argument("--only", action="append", default=[], help="ne garder que les fichiers dont le chemin contient ce texte")
+    s.add_argument("--limit", type=int, help="nombre maximal de fichiers inventoriés par dossier")
+    s.add_argument("--config", help="réglages de synchro JSON")
+    s.add_argument("--truth", help="JSON de repères posés à la main : [{ref, sig, t_ref, t_sig}]")
+    s.add_argument("--tz", default="Europe/Paris", help="fuseau des noms de fichiers horodatés")
+    s.set_defaults(func=cmd_sync_calibrate)
 
     add("clean-cache", "Vide le cache de segments (jamais les rushes ni les rendus)", cmd_clean_cache)
     return p

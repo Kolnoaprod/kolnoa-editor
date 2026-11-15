@@ -149,3 +149,21 @@ def ncc(ref: np.ndarray, sig: np.ndarray, expected: int = 0, search: int | None 
     if p is None:
         return None
     return int(round(p.lag_s)), p.psr, p.value
+
+
+def competing_peak(env_ref: np.ndarray, env_sig: np.ndarray, best_lag: int, exclusion: int) -> float | None:
+    """Hauteur relative (0-1+) du meilleur pic de corrélation d'enveloppes situé à plus de `exclusion` échantillons du
+    pic retenu, divisée par la hauteur de ce dernier. Proche de 1 : deux alignements aussi plausibles (musique ou boucle
+    jouée plusieurs fois, par exemple) : le résultat est ambigu même si le pic retenu est net."""
+    curve = ncc_curve(env_ref, env_sig)
+    if curve is None:
+        return None
+    cc, lags0, lo, hi = curve
+    seg = cc[lo:hi].copy()
+    i0 = best_lag - lags0 - lo
+    if not (0 <= i0 < len(seg)) or seg[i0] <= 0:
+        return None
+    ref_val = float(seg[i0])
+    seg[max(0, i0 - exclusion): i0 + exclusion + 1] = -1.0
+    other = float(seg.max()) if len(seg) else -1.0
+    return max(other, 0.0) / ref_val

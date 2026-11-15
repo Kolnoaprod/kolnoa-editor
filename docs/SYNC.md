@@ -36,6 +36,35 @@ l'audio. L'export en liste de décisions refuse les plans multicam tant que le r
 5. **Confiance** = moyenne géométrique de (netteté des pics, couverture, accord entre fenêtres). Seuils
    `ok_confidence`, `uncertain_confidence`, `min_psr`… dans `SyncConfig` (JSON via `--config`) : **valeurs initiales,
    pas des vérités**.
+6. **Ambiguïté** : si un second alignement (à plus de `coarse_ambiguity_exclusion_s` du premier) atteint
+   `coarse_ambiguity_ratio` × la hauteur du premier (même chanson jouée deux fois, boucle), un résultat « ok » est rétrogradé
+   en `incertain` avec la note « alignement ambigu ». Un indice de métadonnées restreint la recherche et lève le doute,
+   sans jamais se substituer à la mesure.
+
+### Le score de confiance est une heuristique, pas une probabilité
+
+La confiance (0–1) est un **score de classement** : moyenne géométrique de trois termes sans unité commune. Elle sert à
+trier et à fixer des seuils d'état ; elle **ne signifie pas** « x % de chances que ce soit juste » et ne doit pas être
+affichée comme telle. Les signaux synthétiques ne démontrent aucune calibration. Seule la comparaison avec des repères
+vérifiés à l'image sur de vrais rushes (`kolnoa sync-calibrate`, section Calibration) permet de dire quel seuil donne
+quel taux d'erreur ; ces taux, mesurés, remplaceront le mot « confiance » dans l'interface.
+
+### Conventions de temps, conversions inverses et validité
+
+`t_groupe = offset + t_angle × (1 + dérive_ppm × 1e-6)` pour `t_angle` dans la plage de validité du segment
+(`Angle.range`, en secondes de l'angle, **bornes incluses** `[début, fin]`). Inverse :
+`Angle.to_angle(t_groupe) = (t_groupe − offset) / (1 + dérive×1e-6)` (aller-retour exact à 1e-9 s). Hors de la plage,
+`source_times_at` renvoie `None` (pas d'extrapolation silencieuse) ; un instant exactement à la frontière de deux segments
+d'un même fichier est valide pour **les deux** (à l'appelant de choisir : le rendu prendra le segment qui commence).
+Un clip sans rien de commun avec le maître est `impossible` ; un clip qui déborde du maître (en partie hors
+enregistrement) n'est jamais `ok` : la partie sans correspondance est signalée en note.
+
+### Cas difficiles testés (`tests/test_sync_robustness.py`)
+
+Boucle strictement périodique → `impossible`/`incertain`, jamais « ok » à un faux instant ; applaudissements
+partagés → ok, sans rapport → pas « ok » ; écho long (RT ≈ 1 s) → décalage conservé à moins d'une image ; même chanson
+deux fois → `incertain` + note. Limite connue : **une musique identique jouée à deux instants et enregistrée en entier
+par l'angle reste indécidable sans indice** ; c'est précisément le rôle de la validation humaine.
 
 Limites assumées : sans structure d'énergie (bruit stationnaire pur) la recherche grossière échoue → « impossible » ;
 un saut plus grand que `wide_search_s` apparaît comme « fenêtres sans correspondance » (noté) ; la dérive n'est pas
@@ -52,7 +81,7 @@ jamais appliqués comme synchro.
 
 Séries de luminosité (miniatures 32×18, 10 i/s) → événements (flash, lumières de piste, soleil/nuage) → corrélation →
 **candidats classés** avec confiance plafonnée (`visual_max_confidence` 0,6, jamais « ok »), nombre d'événements
-concordants et **risque de coïncidence** (loi de Poisson corrigée du nombre de décalages testés). États :
+concordants et **score heuristique de risque de coïncidence** (approximation de Poisson corrigée du nombre de décalages testés ; ce n'est pas une probabilité statistiquement validée). États :
 `proposition`, `faible` (à vérifier), `ambigu` (événements répétitifs), `impossible` (pas assez d'événements : on
 propose un alignement manuel). Rien n'est appliqué automatiquement : `multicam-sync --accept-visual N` pose la
 proposition en `incertain`, l'humain la valide (`multicam-accept`) ou la règle image par image. Une vue aérienne et
@@ -71,6 +100,8 @@ un plan serré peuvent n'avoir aucun événement commun : le module le dit.
 
 `multicam-create`, `multicam-sync [--dry-run] [--config] [--accept-visual N]`, `multicam-align`, `multicam-nudge`,
 `multicam-lock`, `multicam-accept`, `multicam-at` ; tout passe par la timeline : annulable (`timeline-undo`), journalisé.
+
+Mesure sur de vrais rushes : `kolnoa sync-calibrate`, voir [SYNC_CALIBRATION.md](SYNC_CALIBRATION.md) (constats réels, réglages modifiés, ce qui reste non mesuré).
 
 ## Rushes nécessaires pour calibrer (à fournir, rien ne bloque le développement)
 

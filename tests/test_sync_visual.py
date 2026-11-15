@@ -20,7 +20,7 @@ def pair(offset, seed=0, shared=SHARED, private_ref=3, private_sig=4, length=200
     return LumaSeries(ref, FPS), LumaSeries(sig, FPS)
 
 
-@pytest.mark.parametrize("offset", [15.0, 40.0, 63.3])
+@pytest.mark.parametrize("offset", [15.0, 40.0])
 def test_shared_light_events_give_a_ranked_proposal_close_to_the_truth(offset):
     ref, sig = pair(offset)
     res = propose_visual_sync(ref, sig)
@@ -28,6 +28,18 @@ def test_shared_light_events_give_a_ranked_proposal_close_to_the_truth(offset):
     best = res.candidates[0]
     assert abs(best.offset - offset) <= 0.2 and best.matched_events >= 2
     assert 0.0 < best.confidence <= SyncConfig().visual_max_confidence       # jamais « ok », plafonnée
+
+
+def test_only_two_shared_events_overlap_is_honestly_not_demonstrated():
+    """À 63,3 s de décalage, seuls 2 événements communs se recouvrent. Depuis la déduplication des événements (un flash
+    n'en compte plus plusieurs), le moteur ne prétend plus démontrer la correspondance : « impossible » à confiance
+    minimale, tout en gardant le bon décalage en tête de liste pour l'alignement manuel."""
+    ref, sig = pair(63.3)
+    res = propose_visual_sync(ref, sig)
+    assert res.status in ("impossible", "faible")
+    best = res.candidates[0]
+    assert abs(best.offset - 63.3) <= 0.2
+    assert best.confidence <= 0.25
 
 
 def test_confidence_cap_is_a_setting():

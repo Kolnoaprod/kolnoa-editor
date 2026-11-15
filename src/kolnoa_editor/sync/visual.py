@@ -48,7 +48,8 @@ class VisualCandidate:
     psr: float
     matched_events: int
     rank: int = 1
-    p_chance: float = 1.0   # probabilité que ces concordances soient dues au hasard (corrigée du nombre de décalages testés)
+    coincidence_risk: float = 1.0   # SCORE HEURISTIQUE de risque de coïncidence (0 = improbable, 1 = probable). Approximation de Poisson
+                                    # corrigée du nombre de décalages testés : ce n'est PAS une probabilité statistiquement validée.
 
 
 @dataclass
@@ -62,14 +63,16 @@ class VisualResult:
 
 
 def luma_series(path: Path | str, cfg: SyncConfig | None = None, cancel: CancelToken | None = None,
-                tmp_dir: Path | None = None) -> LumaSeries:
-    """Série de luminosité moyenne d'une vidéo, via ffmpeg (miniatures 32×18 en niveaux de gris)."""
+                tmp_dir: Path | None = None, max_seconds: float | None = None) -> LumaSeries:
+    """Série de luminosité moyenne d'une vidéo, via ffmpeg (miniatures 32×18 en niveaux de gris).
+    `max_seconds` borne la lecture au début du fichier (rushes de plusieurs gigaoctets)."""
     cfg = cfg or SyncConfig()
     fd, name = tempfile.mkstemp(suffix=".gray", dir=tmp_dir)
     os.close(fd)
     out = Path(name)
     try:
-        run([ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", "-i", str(path), "-an",
+        lim = ["-t", f"{max_seconds:.3f}"] if max_seconds else []
+        run([ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", *lim, "-i", str(path), "-an",
              "-vf", f"fps={cfg.visual_fps},scale={W}:{H}:flags=area,format=gray", "-f", "rawvideo", str(out)],
             cancel=cancel)
         raw = np.fromfile(out, dtype=np.uint8)
@@ -77,6 +80,23 @@ def luma_series(path: Path | str, cfg: SyncConfig | None = None, cancel: CancelT
         out.unlink(missing_ok=True)
     frames = raw[: (len(raw) // (W * H)) * W * H].reshape(-1, W * H)
     return LumaSeries(frames.mean(axis=1).astype(np.float64), cfg.visual_fps)
+
+
+def _dedupe(idx: np.ndarray, z: np.ndarray, min_gap: int) -> np.ndarray:
+    """Un flash unique donne plusieurs images consécutives au-dessus du seuil (montée, descente, rebonds) : on ne garde
+    que l'indice le plus marqué de chaque groupe d'indices distants de moins de `min_gap` images."""
+    if len(idx) == 0:
+        return idx
+    kept: list[int] = []
+    group = [int(idx[0])]
+    for i in idx[1:]:
+        if int(i) - group[-1] < min_gap:
+            group.append(int(i))
+        else:
+            kept.append(max(group, key=lambda j: z[j]))
+            group = [int(i)]
+    kept.append(max(group, key=lambda j: z[j]))
+    return np.array(kept, dtype=int)
 
 
 def _events(series: LumaSeries, cfg: SyncConfig) -> tuple[np.ndarray, np.ndarray]:
@@ -91,7 +111,7 @@ def _events(series: LumaSeries, cfg: SyncConfig) -> tuple[np.ndarray, np.ndarray
     scale = max(mad, 0.5)                          # plancher : le bruit de compression n'est pas un événement
     z = np.clip((d - med) / scale, 0.0, 12.0)
     z = np.where(d >= cfg.visual_event_min_delta, z, 0.0)       # sous ce saut de luminosité : bruit, pas un événement
-    idx = np.flatnonzero(z >= cfg.visual_event_z)
+    idx = _dedupe(np.flatnonzero(z >= cfg.visual_event_z), z, max(1, int(round(cfg.visual_event_min_gap_s * series.fps))))
     k = max(1, int(round(0.3 * series.fps)))      # étalement ≈ 0,3 s
     kernel = np.hanning(2 * k + 1)
     sig = np.convolve(z, kernel / kernel.sum(), mode="same")
@@ -163,24 +183,24 @@ def propose_visual_sync(ref: LumaSeries, sig: LumaSeries, cfg: SyncConfig | None
         lam = max(overlap, matched) * 2 * cfg.visual_match_s * (len(i_ref) / max(ref.duration, 1e-9))
         p_raw = 1.0 - sum(math.exp(-lam) * lam ** k / math.factorial(k) for k in range(matched))
         n_lags = max(1.0, ((hi - lo) / fps) / (2 * cfg.visual_match_s))
-        p_chance = float(min(1.0, max(p_raw, 0.0) * n_lags))
-        c_sig = float(np.clip(-math.log10(max(p_chance, 1e-12)) / 2.0, 0.0, 1.0))
-        cands.append(VisualCandidate(offset, 0.0, float(seg[i]), psr, matched, rank, p_chance))
+        coincidence_risk = float(min(1.0, max(p_raw, 0.0) * n_lags))
+        c_sig = float(np.clip(-math.log10(max(coincidence_risk, 1e-12)) / 2.0, 0.0, 1.0))
+        cands.append(VisualCandidate(offset, 0.0, float(seg[i]), psr, matched, rank, coincidence_risk))
         cands[-1].confidence = round(cfg.visual_max_confidence *
                                      (max(c_psr, 0.02) * max(c_ev, 0.02) * max(c_sig, 0.02)) ** (1 / 3), 4)
     best = cands[0]
     res.candidates = cands
-    if best.psr < cfg.visual_min_psr or best.matched_events < cfg.visual_min_events or best.p_chance > cfg.visual_weak_chance_p:
+    if best.psr < cfg.visual_min_psr or best.matched_events < cfg.visual_min_events or best.coincidence_risk > cfg.visual_weak_coincidence:
         res.notes.append(f"aucun alignement ne se détache (pic/bruit {best.psr:.1f}, {best.matched_events} "
-                         f"événement(s) concordant(s), risque de coïncidence {best.p_chance:.2f}) : correspondance "
+                         f"événement(s) concordant(s), risque de coïncidence {best.coincidence_risk:.2f}) : correspondance "
                          "visuelle impossible ou non démontrée. Proposer un alignement manuel côte à côte.")
         for c in cands:
             c.confidence = min(c.confidence, 0.1)
         return res
-    if best.p_chance > cfg.visual_max_chance_p:
+    if best.coincidence_risk > cfg.visual_max_coincidence:
         res.status = "faible"
         res.notes.append(f"indice faible : {best.matched_events} événement(s) concordant(s), risque de coïncidence "
-                         f"{best.p_chance:.2f}. À vérifier côte à côte avant toute validation.")
+                         f"{best.coincidence_risk:.2f}. À vérifier côte à côte avant toute validation.")
         for c in cands:
             c.confidence = min(c.confidence, 0.25)
         return res

@@ -17,7 +17,7 @@ import numpy as np
 
 from ..ffmpeg import CancelToken
 from .config import SyncConfig
-from .correlate import gcc_phat, ncc
+from .correlate import competing_peak, gcc_phat, ncc
 
 STATUSES = ("ok", "incertain", "discontinu", "impossible")
 
@@ -103,8 +103,7 @@ def _measure(ref, starts, sig_win, rms, w, cfg, plan, drift_ppm, cancel) -> list
         off = g0 + w / 2.0 - tc                       # décalage t_groupe - t_angle au centre de la fenêtre
         valid = peak.psr >= cfg.min_psr
         results.append(WindowResult(tc, off, peak.psr, valid=valid))
-        if valid:
-            plan.update(s, g0)
+        # pas de suivi de la dernière fenêtre : un faux pic (mesuré sur de vrais micros) décalerait toute la suite
     return results
 
 
@@ -129,6 +128,38 @@ class _Plan:
         self.last = (s, g0)
 
 
+def _consensus(t: np.ndarray, y: np.ndarray, p: np.ndarray, mask: np.ndarray, cfg: SyncConfig) -> tuple[float, float, np.ndarray]:
+    """Droite (pente, ordonnée) de décalage = f(temps) qui a le plus d'inliers parmi les fenêtres `mask` (exhaustif :
+    au plus 12 fenêtres). Départage : somme des PSR des inliers. Affinée aux moindres carrés sur les inliers."""
+    ids = np.flatnonzero(mask)
+    cands = [(0.0, float(y[i])) for i in ids]
+    for a in range(len(ids)):
+        for b in range(a + 1, len(ids)):
+            dt = t[ids[b]] - t[ids[a]]
+            if dt >= 60.0:
+                sl = (y[ids[b]] - y[ids[a]]) / dt
+                if abs(sl) * 1e6 <= cfg.max_drift_ppm:
+                    cands.append((float(sl), float(y[ids[a]] - sl * t[ids[a]])))
+    best, best_key = None, (-1, -1.0)
+    for sl, ic in cands:
+        inl = mask & (np.abs(y - (ic + sl * t)) <= cfg.inlier_tol_s)
+        key = (int(inl.sum()), float(p[inl].sum()))
+        if key > best_key:
+            best, best_key = (sl, ic, inl), key
+    sl, ic, inl = best
+    sel = np.flatnonzero(inl)
+    if len(sel) >= 3 and t[sel[-1]] - t[sel[0]] >= 60.0:
+        sl2, ic2 = np.polyfit(t[sel], y[sel], 1)
+        if abs(sl2) * 1e6 <= cfg.max_drift_ppm * 2:
+            inl2 = mask & (np.abs(y - (ic2 + sl2 * t)) <= cfg.inlier_tol_s)
+            if inl2.sum() >= inl.sum():
+                sl, ic, inl = float(sl2), float(ic2), inl2
+    elif len(sel) >= 1:
+        ic, sl = float(np.median(y[sel])), 0.0
+        inl = mask & (np.abs(y - ic) <= cfg.inlier_tol_s)
+    return sl, ic, inl
+
+
 def _analyse(results: list[WindowResult], w: float, cfg: SyncConfig, metrics: dict, t0: float) -> SyncEstimate:
     scored = [r for r in results if not r.silent]
     valid = [r for r in results if r.valid]
@@ -141,47 +172,57 @@ def _analyse(results: list[WindowResult], w: float, cfg: SyncConfig, metrics: di
         est.windows = results
         return est
 
-    # segments (discontinuités) puis droite robuste du segment dominant
+    # consensus robuste : la droite (décalage, dérive) qui explique le plus de fenêtres ; les fenêtres isolées qui
+    # n'obéissent à aucune droite sont des pics parasites (mesuré sur de vrais micros : pics faux à PSR 8-20), pas des
+    # discontinuités ; une discontinuité = un 2e groupe cohérent de fenêtres contiguës.
     t = np.array([r.t_angle for r in valid])
     y = np.array([r.offset for r in valid])
-    runs: list[list[int]] = [[0]]
-    for i in range(1, len(valid)):
-        dt = t[i] - t[i - 1]
-        if abs(y[i] - y[i - 1]) > cfg.jump_tol_s + cfg.max_drift_ppm * 1e-6 * dt:
-            runs.append([])
-        runs[-1].append(i)
+    p = np.array([r.psr for r in valid])
     notes: list[str] = []
+    members: list[np.ndarray] = []                 # indices (dans `valid`) de chaque segment, dominant en premier
+    models: list[tuple[float, float]] = []
+    free = np.ones(len(valid), dtype=bool)
+    while free.sum() >= (2 if members else 1):
+        mask = free.copy()
+        slope, icpt, inl = _consensus(t, y, p, mask, cfg)
+        if members:
+            # segment secondaire : au moins 2 fenêtres, contiguës (aucune fenêtre du segment dominant entre elles)
+            ids = np.flatnonzero(inl)
+            dom = members[0]
+            if len(ids) < 2 or any(ids[0] < d < ids[-1] for d in dom) or len(members) >= 4:
+                break
+        members.append(np.flatnonzero(inl))
+        models.append((slope, icpt))
+        free &= ~inl
     segments: list[Segment] = []
-    for run in runs:
-        tt, yy = t[run], y[run]
-        if len(run) >= 3 and tt[-1] - tt[0] >= 60.0:
-            sl, ic = _theil_sen(tt, yy)
-        else:
-            sl, ic = 0.0, float(np.median(yy))
-        segments.append(Segment(float(tt[0] - w / 2), float(tt[-1] + w / 2), ic, sl * 1e6, len(run)))
-    dom = max(range(len(runs)), key=lambda k: len(runs[k]))
-    idx = runs[dom]
-    tt, yy = t[idx], y[idx]
-    drift_measured = len(idx) >= 3 and (tt[-1] - tt[0]) >= 60.0
-    if drift_measured:
-        slope, icpt = _theil_sen(tt, yy)
-        inl = np.abs(yy - (icpt + slope * tt)) <= cfg.inlier_tol_s
-        if inl.sum() >= 3:
-            slope, icpt = np.polyfit(tt[inl], yy[inl], 1)
-            inl = np.abs(yy - (icpt + slope * tt)) <= cfg.inlier_tol_s
-    else:
-        slope, icpt = 0.0, float(np.median(yy))
-        inl = np.abs(yy - icpt) <= cfg.inlier_tol_s
+    order = sorted(range(len(members)), key=lambda k: t[members[k][0]])
+    for k in order:
+        tt = t[members[k]]
+        segments.append(Segment(float(tt[0] - w / 2), float(tt[-1] + w / 2), models[k][1], models[k][0] * 1e6, len(tt)))
+    runs = members
+    slope, icpt = models[0]
+    idx = list(range(len(valid)))
+    idx_in = members[0]
+    tt, yy = t[idx_in], y[idx_in]
+    drift_measured = len(idx_in) >= 3 and (tt[-1] - tt[0]) >= 60.0 and abs(slope) > 0.0
+    if not drift_measured:
         notes.append("dérive non mesurable (clip court ou peu de fenêtres valides) : fixée à 0")
+        slope, icpt = 0.0, float(np.median(yy))
     drift_ppm = float(slope * 1e6)
     suspicious = abs(drift_ppm) > cfg.max_drift_ppm
     if suspicious:
         notes.append(f"dérive {drift_ppm:.0f} ppm suspecte (> {cfg.max_drift_ppm:.0f}) : ignorée, à vérifier")
         slope, icpt, drift_ppm = 0.0, float(np.median(yy)), 0.0
-        inl = np.abs(yy - icpt) <= cfg.inlier_tol_s
-    inlier_idx = {idx[k] for k in range(len(idx)) if inl[k]}
+    inl = np.abs(y - (icpt + slope * t)) <= cfg.inlier_tol_s
+    inl_dom = np.zeros(len(valid), dtype=bool)
+    inl_dom[idx_in] = True
+    inl &= inl_dom
+    inlier_idx = {int(k) for k in np.flatnonzero(inl)}
     for k, r in enumerate(valid):
         r.inlier = k in inlier_idx
+    stray = len(valid) - sum(len(m) for m in members)
+    if stray > 0:
+        notes.append(f"{stray} fenêtre(s) aberrante(s) ignorée(s) (pic isolé qui n'obéit à aucun décalage cohérent)")
     n_inl = len(inlier_idx)
 
     # confiance (composition documentée dans docs/SYNC.md)
@@ -204,6 +245,11 @@ def _analyse(results: list[WindowResult], w: float, cfg: SyncConfig, metrics: di
     if len(runs) > 1:
         status = "discontinu"
         notes.append(f"{len(runs)} segments au décalage différent : clip discontinu, à découper")
+    elif confidence >= cfg.ok_confidence and (len(scored) - n_inl) / len(scored) >= cfg.max_unmatched_ratio:
+        status = "incertain"
+        confidence = min(confidence, cfg.ok_confidence - 0.01)
+        notes.append(f"{len(scored) - n_inl} fenêtre(s) sur {len(scored)} sans correspondance cohérente : le clip n'est "
+                     "peut-être qu'en partie dans l'enregistrement maître — vérifier avant de s'y fier")
     elif confidence >= cfg.ok_confidence:
         status = "ok"
     elif confidence >= cfg.uncertain_confidence:
@@ -231,6 +277,12 @@ def estimate_audio_sync(ref, sig, cfg: SyncConfig | None = None, hint: tuple[flo
     if dur < 2.0:
         return _impossible("clip trop court (< 2 s) pour une synchro fiable", t0)
 
+    # 0. piste vide ? (mesuré sur de vrais rushes : caméra dont l'audio est à zéro numérique, -91 dB)
+    probes = [float(v) for v in np.linspace(0.0, max(dur - 2.0, 0.0), 6)]
+    if max(float(np.max(np.abs(sig.read(t, 2.0)))) for t in probes) < cfg.empty_audio_peak:
+        return _impossible("piste audio vide (silence numérique) : aucune synchro audio possible avec cet angle, "
+                           "utiliser la synchro visuelle assistée ou un alignement manuel", t0, empty_audio=True)
+
     # 1. recherche grossière globale (enveloppes d'énergie)
     env_ref, env_sig = ref.envelope(cfg.env_rate), sig.envelope(cfg.env_rate)
     if hint is not None:
@@ -242,6 +294,11 @@ def estimate_audio_sync(ref, sig, cfg: SyncConfig | None = None, hint: tuple[flo
                            env_psr=0.0 if res is None else round(res[1], 2))
     coarse, env_psr = res[0] / cfg.env_rate, res[1]
     base = {"env_psr": round(env_psr, 2), "coarse_offset": round(coarse, 4)}
+    rival = None
+    if hint is None:                      # avec un indice, la plage est déjà restreinte : pas d'ambiguïté à signaler
+        rival = competing_peak(env_ref, env_sig, res[0], int(round(cfg.coarse_ambiguity_exclusion_s * cfg.env_rate)))
+        if rival is not None:
+            base["rival_peak_ratio"] = round(rival, 3)
 
     # 2. fenêtres d'affinage, passe 1 (sans compensation de dérive)
     w = min(cfg.window_s, dur)
@@ -260,5 +317,10 @@ def estimate_audio_sync(ref, sig, cfg: SyncConfig | None = None, hint: tuple[flo
         if est2.metrics.get("valid", 0) >= est.metrics.get("valid", 0) and est2.status != "impossible":
             est2.notes.append(f"dérive compensée sur les fenêtres (passe 2, {est.drift_ppm:.0f} ppm de départ)")
             est = est2
+    if rival is not None and rival >= cfg.coarse_ambiguity_ratio and est.status == "ok":
+        est.status = "incertain"
+        est.confidence = min(est.confidence, cfg.ok_confidence - 0.01)
+        est.notes.append(f"alignement ambigu : un autre décalage est presque aussi plausible (rapport {rival:.2f}) — "
+                         "musique ou boucle répétée ? Vérifier côte à côte ou donner un indice (métadonnées, repère)")
     est.elapsed_s = time.perf_counter() - t0
     return est
