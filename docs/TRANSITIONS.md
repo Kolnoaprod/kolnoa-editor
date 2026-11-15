@@ -1,51 +1,51 @@
-# Fondus et transitions « style CapCut » pour l'événementiel (spécification PR D)
+# Fondus et transitions simples (spécification PR D)
 
-**Demande confirmée (utilisateur)** : des fondus et transitions sympas, façon CapCut, adaptés à l'événementiel,
-dans un montage cinématographique haut de gamme, fluide, sans jump cuts agressifs.
-Tout le reste de ce document (familles, durées, règles d'emploi) est une **proposition à valider** : aucune
-durée n'est figée tant que ChatGPT / l'utilisateur ne l'ont pas confirmée (cf. issue #1).
+**Confirmé par l'utilisateur** : des fondus et des transitions avec flash, « des choses simples », dans un
+montage cinématographique haut de gamme, fluide, sans jump cuts agressifs. Pas d'effets compliqués.
+Les durées par défaut et les règles d'emploi ci-dessous sont des **propositions à valider** (cf. issue #1) :
+aucune durée n'est figée tant qu'elle n'a pas été vue à l'œil sur un vrai film.
 
-## Ce qu'ffmpeg 6.1 sait déjà faire (vérifié dans le bac à sable)
+## Catalogue volontairement court
 
-`xfade` : `fade`, `fadeblack`, `fadewhite`, `fadegrays`, `dissolve`, `slideleft/right/up/down`,
-`smoothleft/right/up/down`, `wipe*`, `circleopen/close`, `circlecrop`, `radial`, `zoomin`, `squeezeh/v`,
-`pixelize`, `hlslice/hrslice`, `hlwind/hrwind`, `coverleft`, `revealleft`, `distance`… ; `acrossfade` pour le son.
-Pas de pack « CapCut » tel quel : les effets de type *whip pan flou*, *flash/glow*, *glitch* sont **composés**
-(xfade + flou directionnel `boxblur`/`gblur` + pic d'exposition `eq`/`curves` sur quelques images).
-
-## Familles proposées (Transition = type + durée en images + paramètres, cf. `Clip.extra` puis champ dédié en PR D)
-
-| Famille | Rendu | Emploi événementiel proposé |
+| Transition | Rendu | Emploi proposé |
 | --- | --- | --- |
-| **Fondu enchaîné** (`fade`/`dissolve`) | doux, invisible | cérémonie, émotion, discours ; par défaut |
-| **Fondu au noir / au blanc** (`fadeblack`/`fadewhite`) | respiration, changement de séquence | début/fin de chapitre, ouverture et clap de fin |
-| **Flash** (pic de lumière 3-5 images) | impact rythmé | coup de musique, entrée des mariés, drop |
-| **Glissé / push** (`smooth*`, `slide*`) | mouvement dans le sens du plan | enchaînement de plans dynamiques, soirée |
-| **Whip pan** (slide + flou directionnel) | transition « caméra » | danse, ambiance, passage cérémonie → soirée |
-| **Zoom** (`zoomin` + recadrage) | pulsation | teaser, moments forts sur le temps de la musique |
-| **Match cut / sur le mouvement** | coupe masquée | réservé à l'assistant (PR E), pas un effet |
+| **Coupe** | aucune | par défaut entre plans d'une même action |
+| **Fondu enchaîné** (`xfade fade`) | doux, invisible | cérémonie, émotion, discours, enchaînement de plans |
+| **Fondu au noir** (`fadeblack`) | respiration | début et fin de film, changement de séquence |
+| **Fondu au blanc** (`fadewhite`) | lumineux, onirique | souvenirs, ouverture, transition douce de séquence |
+| **Flash** | pic de lumière de quelques images, coupe masquée | temps fort de la musique, entrée des mariés, teaser, soirée |
+| **Fondu d'entrée / de sortie** d'un plan | déjà géré (`fade_in`/`fade_out`) | début et fin des plans, musique |
+
+Hors catalogue tant que l'utilisateur ne le demande pas : glissés, whip pan, zoom, glitch, volets.
+Le modèle est conçu pour les accueillir plus tard sans changer le schéma (type de transition = simple texte).
+
+## Réalisation technique avec ffmpeg 6.1 (vérifié)
+
+- Fondus : `xfade` (`fade`, `fadeblack`, `fadewhite`) + `acrossfade` pour que le son ne claque pas.
+- Flash : un fondu au blanc très court avec pic d'exposition (`xfade fadewhite` sur ~4 images, ou surimpression
+  d'une image blanche à opacité animée), centré sur la coupe pour la masquer. Aucun filtre exotique.
 
 ## Règles proposées (modifiables)
 
-1. **Pas de transition fantaisiste pendant la cérémonie** (Houppa, vœux, bénédictions) : coupe ou fondu seulement.
-2. **Une seule famille « décorative » par séquence** pour garder une signature (pas de mélange sauvage).
-3. **Calées sur la musique** : les transitions rythmées tombent sur les repères `beat` (PR E) ; sans repère, durées
-   courtes et constantes plutôt qu'aléatoires.
-4. **Durée en images entières** (aucune dérive) ; fondu audio assorti (`acrossfade`) pour que le son ne claque pas.
-5. **Jamais plus longue que la moitié du plus court des deux plans** (sinon refus avec message clair).
-6. **Aperçu = export** : la même chaîne de filtres sert à l'aperçu proxy et au rendu final (critère SSIM de la PR D).
-7. Tout est **réversible et verrouillable** comme le reste : `set_transition` / `remove_transition` dans la timeline,
-   une transition sur un plan verrouillé est refusée.
+1. Cérémonie (Houppa, vœux, bénédictions) : coupe ou fondu enchaîné uniquement, **jamais de flash**.
+2. Le flash est réservé aux temps forts : il tombe sur un repère `beat` (PR E) ; sans repère, pas de flash automatique.
+3. Durées en **images entières**, jamais plus longues que la moitié du plus court des deux plans (sinon refus clair).
+4. Cohérence : un seul style de transition « décorative » par séquence, durées constantes plutôt qu'aléatoires.
+5. **Aperçu = export** : même chaîne de filtres pour le proxy et le rendu final (critère SSIM de la PR D).
+6. Réversible et verrouillable comme le reste : `set_transition` / `remove_transition`, refusées sur un plan verrouillé.
 
-## Réglages à valider avec l'utilisateur (questions ouvertes)
+## Valeurs de départ à tester (hypothèses, non confirmées)
 
-- Quelles transitions CapCut aimes-tu **précisément** (captures ou noms) ? On les reproduira une par une.
-- Durée par défaut du fondu enchaîné et du flash ? (proposition de départ à tester à l'œil sur un vrai film).
-- Doit-on proposer des **presets par moment** (cérémonie / cocktail / soirée / teaser) ?
-- Flou de mouvement des whip pans : subtil ou franc ?
+Fondu enchaîné : environ 0,5 s (12 images à 25 i/s) ; fondu au noir : 0,8 à 1 s ; flash : 4 à 6 images au total.
+À régler sur de vrais rushes puis à figer ici une fois validées.
+
+## Questions ouvertes (une seule vraiment utile)
+
+- Quelle durée te paraît juste pour le fondu enchaîné et pour le flash ? On teste les valeurs de départ sur un
+  extrait et on ajuste à l'œil.
 
 ## Plan technique (PR D)
 
-`Transition` dans le modèle (type, durée en images, paramètres) ; opérations `set_transition`/`remove_transition`
-avec inverses ; générateur de filtres `xfade` + composites (flash, whip) ; validation (durée max, plans voisins,
-cadence) ; tests : durée totale exacte, parité aperçu/export, rollback ; catalogue exposé à l'assistant (PR E).
+`Transition` dans le modèle (type texte, durée en images, paramètres) ; opérations `set_transition` /
+`remove_transition` avec inverses ; générateur de filtres `xfade` + flash ; validation (durée max, plans voisins,
+cadence) ; tests : durée totale exacte du film, parité aperçu/export, rollback ; catalogue exposé à l'assistant (PR E).
