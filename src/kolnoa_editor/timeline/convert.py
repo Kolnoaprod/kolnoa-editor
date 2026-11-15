@@ -48,6 +48,10 @@ def to_decision_list(tl: Timeline) -> tuple[DecisionList, list[str]]:
         if c.track != main.id:
             raise TimelineExportError(f"{c.id} est sur la piste {c.track} : seules les pistes vidéo "
                                       "principales s'exportent en liste de décisions")
+    grouped = [c.id for c in tl.clips if c.group]
+    if grouped:
+        raise TimelineExportError(f"plans multicam ({', '.join(grouped[:5])}) : leur son vient du maître du groupe, "
+                                  "ce que la liste de décisions ne sait pas exprimer (rendu multicam : PR D)")
     ordered = tl.clips_on(main.id)
     expected = 0
     for c in ordered:

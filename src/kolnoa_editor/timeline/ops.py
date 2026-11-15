@@ -8,10 +8,11 @@ Un `Transaction` regroupe plusieurs opérations en un seul pas d'annulation, de 
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, ClassVar
 
-from .model import (AUDIO_MODES, Clip, LockedError, Marker, Timeline, TimelineError, Track)
+from .model import (AUDIO_MODES, Angle, Clip, LockedError, Marker, MulticamGroup, Timeline, TimelineError, Track)
 
 _REGISTRY: dict[str, type] = {}
 MIN_PIECE = 1  # image : plus petit morceau acceptable lors d'une scission
@@ -386,6 +387,154 @@ class SetProject(Op):
         return "~ projet : " + ", ".join(f"{k}" for k in self.props)
 
 
+# --- groupes multicam ---------------------------------------------------------
+def _group_from(d: dict) -> MulticamGroup:
+    try:
+        return MulticamGroup(id=d["id"], master=d["master"], name=d.get("name", ""),
+                             angles=[Angle(**a) for a in d.get("angles", [])])
+    except (KeyError, TypeError) as exc:
+        raise TimelineError(f"Groupe multicam mal formé : {exc}") from exc
+
+
+@register
+@dataclass
+class AddGroup(Op):
+    type: ClassVar[str] = "add_group"
+    group: dict
+
+    def apply(self, tl):
+        g = _group_from(self.group)
+        if any(x.id == g.id for x in tl.groups):
+            raise TimelineError(f"groupe déjà existant : {g.id}")
+        tl.groups.append(g)
+        return RemoveGroup(g.id)
+
+    def describe(self):
+        return f"+ groupe multicam {self.group['id']} ({len(self.group.get('angles', []))} angle(s))"
+
+
+@register
+@dataclass
+class RemoveGroup(Op):
+    type: ClassVar[str] = "remove_group"
+    group_id: str
+
+    def apply(self, tl):
+        g = tl.group(self.group_id)
+        users = [c.id for c in tl.clips if c.group == g.id]
+        if users:
+            raise TimelineError(f"le groupe {g.id} est utilisé par {', '.join(users)}")
+        tl.groups.remove(g)
+        return AddGroup(asdict(g))
+
+    def describe(self):
+        return f"- groupe multicam {self.group_id}"
+
+
+@register
+@dataclass
+class AddAngle(Op):
+    type: ClassVar[str] = "add_angle"
+    group_id: str
+    angle: dict
+
+    def apply(self, tl):
+        g = tl.group(self.group_id)
+        try:
+            a = Angle(**self.angle)
+        except TypeError as exc:
+            raise TimelineError(f"Angle mal formé : {exc}") from exc
+        if any(x.id == a.id for x in g.angles):
+            raise TimelineError(f"angle déjà existant : {g.id}/{a.id}")
+        g.angles.append(a)
+        return RemoveAngle(g.id, a.id)
+
+    def describe(self):
+        return f"+ angle {self.group_id}/{self.angle['id']} ({self.angle['media']})"
+
+
+@register
+@dataclass
+class RemoveAngle(Op):
+    type: ClassVar[str] = "remove_angle"
+    group_id: str
+    angle_id: str
+
+    def apply(self, tl):
+        g = tl.group(self.group_id)
+        a = g.angle(self.angle_id)
+        if a.id == g.master:
+            raise TimelineError(f"{a.id} est l'angle maître du groupe {g.id}")
+        if a.locked:
+            raise LockedError(f"l'angle {a.id} est verrouillé")
+        users = [c.id for c in tl.clips if c.group == g.id and c.angle == a.id]
+        if users:
+            raise TimelineError(f"l'angle {a.id} est utilisé par {', '.join(users)}")
+        g.angles.remove(a)
+        return AddAngle(g.id, asdict(a))
+
+    def describe(self):
+        return f"- angle {self.group_id}/{self.angle_id}"
+
+
+_ANGLE_PROPS = {"offset", "drift_ppm", "confidence", "status", "method", "locked", "points", "range", "note",
+                "has_audio"}
+
+
+@register
+@dataclass
+class SetAngleSync(Op):
+    """Règle la synchro d'un angle (calcul automatique, alignement manuel, verrou). Un angle verrouillé refuse
+    toute modification de synchro ; on peut toujours le déverrouiller. L'angle maître définit l'axe du groupe."""
+    type: ClassVar[str] = "set_angle_sync"
+    group_id: str
+    angle_id: str
+    props: dict[str, Any]
+
+    def apply(self, tl):
+        g = tl.group(self.group_id)
+        a = g.angle(self.angle_id)
+        unknown = set(self.props) - _ANGLE_PROPS
+        if unknown:
+            raise TimelineError(f"propriétés d'angle inconnues : {sorted(unknown)}")
+        if a.locked and set(self.props) != {"locked"}:
+            raise LockedError(f"l'angle {g.id}/{a.id} est verrouillé")
+        if a.id == g.master and set(self.props) & {"offset", "drift_ppm", "status", "method"}:
+            raise TimelineError(f"{a.id} est l'angle maître : il définit l'axe du groupe")
+        old = {k: copy.deepcopy(getattr(a, k)) for k in self.props}
+        for k, v in self.props.items():
+            setattr(a, k, copy.deepcopy(v))
+        return SetAngleSync(g.id, a.id, old)
+
+    def describe(self):
+        return f"~ synchro {self.group_id}/{self.angle_id} : " + ", ".join(
+            f"{k}={v!r}" for k, v in self.props.items() if k != "points")
+
+
+@register
+@dataclass
+class SetClipAngle(Op):
+    """Change l'angle montré par un plan multicam. Bas niveau : voir `switch_angle` pour le calcul du point d'entrée."""
+    type: ClassVar[str] = "set_clip_angle"
+    clip_id: str
+    angle: str
+    media: str
+    src_in: float
+
+    def apply(self, tl):
+        c = tl.clip(self.clip_id)
+        if not c.group:
+            raise TimelineError(f"{c.id} n'est pas un plan multicam")
+        _writable(tl, c)
+        tl.group(c.group).angle(self.angle)
+        old = SetClipAngle(c.id, c.angle or "", c.media, c.src_in)
+        c.angle, c.media, c.src_in = self.angle, self.media, round(self.src_in, 6)
+        return old
+
+    def describe(self):
+        return f"~ {self.clip_id} : angle {self.angle}"
+
+
 # --- transaction ----------------------------------------------------------
 @register
 @dataclass
@@ -452,3 +601,54 @@ def trim_head(tl: Timeline, clip_id: str, frames: int) -> TrimClip:
     """Raccourcit (frames > 0) ou rallonge (frames < 0) le début d'un plan ; la fin reste en place."""
     c = tl.clip(clip_id)
     return TrimClip(c.id, c.start + frames, c.duration - frames, c.src_in + frames / tl.fps)
+
+
+# --- constructeurs multicam ---------------------------------------------------------
+def _usable_angle(tl: Timeline, group_id: str, angle_id: str):
+    g = tl.group(group_id)
+    a = g.angle(angle_id)
+    if not a.usable:
+        raise TimelineError(f"l'angle {g.id}/{a.id} n'est pas synchronisé de façon fiable (état « {a.status} ») : "
+                            "valider ou aligner à la main d'abord")
+    return g, a
+
+
+def add_multicam_clip(tl: Timeline, group_id: str, angle_id: str, track: str, start: int, duration: int,
+                      group_in: float, clip_id: str | None = None) -> AddClip:
+    """Plan montrant `angle_id` à partir de l'instant `group_in` (secondes de l'axe du groupe) ; son = maître."""
+    g, a = _usable_angle(tl, group_id, angle_id)
+    cid = clip_id or tl.next_clip_id()
+    c = Clip(id=cid, track=track, media=a.media, start=start, duration=duration,
+             src_in=round(a.to_angle(group_in), 6), audio="group", group=g.id, angle=a.id)
+    return AddClip(asdict(c))
+
+
+def switch_angle(tl: Timeline, clip_id: str, angle_id: str) -> SetClipAngle:
+    """Change d'angle en gardant le MÊME instant de groupe : l'image change, le son maître ne bouge pas."""
+    c = tl.clip(clip_id)
+    if not c.group:
+        raise TimelineError(f"{c.id} n'est pas un plan multicam")
+    g, new = _usable_angle(tl, c.group, angle_id)
+    old = g.angle(c.angle or "")
+    t_group = old.to_group(c.src_in)
+    return SetClipAngle(c.id, new.id, new.media, new.to_angle(t_group))
+
+
+def nudge_angle(tl: Timeline, group_id: str, angle_id: str, frames: int) -> SetAngleSync:
+    """Réglage image par image (cadence du projet) : avance (+) ou recule (−) l'angle sur l'axe du groupe."""
+    a = tl.group(group_id).angle(angle_id)
+    return SetAngleSync(group_id, angle_id, {
+        "offset": round(a.offset + frames / tl.fps, 6), "method": "manual", "status": "manual", "confidence": 1.0})
+
+
+def lock_angle(tl: Timeline, group_id: str, angle_id: str, locked: bool = True) -> SetAngleSync:
+    tl.group(group_id).angle(angle_id)
+    return SetAngleSync(group_id, angle_id, {"locked": locked})
+
+
+def accept_angle(tl: Timeline, group_id: str, angle_id: str) -> SetAngleSync:
+    """Validation humaine d'une proposition incertaine (ou visuelle) : elle devient utilisable (état « manual »)."""
+    a = tl.group(group_id).angle(angle_id)
+    if a.status in ("impossible", "unsynced", "reference"):
+        raise TimelineError(f"rien à valider : l'angle {angle_id} est « {a.status} »")
+    return SetAngleSync(group_id, angle_id, {"status": "manual", "confidence": 1.0})
