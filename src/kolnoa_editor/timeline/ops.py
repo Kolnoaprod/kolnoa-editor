@@ -11,7 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, ClassVar
 
-from .model import (AUDIO_MODES, Clip, LockedError, Marker, Timeline, TimelineError, Track)
+from .model import (AUDIO_MODES, DEFAULT_TRANSITION_FRAMES, Clip, LockedError, Marker, Timeline, TimelineError, Track, Transition)
+from .timebase import seconds_to_frames
 
 _REGISTRY: dict[str, type] = {}
 MIN_PIECE = 1  # image : plus petit morceau acceptable lors d'une scission
@@ -144,9 +145,15 @@ class RemoveClip(Op):
     def apply(self, tl):
         c = tl.clip(self.clip_id)
         _writable(tl, c)
+        attached = tl.transitions_of(c.id)          # une coupe qui disparaît emporte ses transitions
+        for t in attached:
+            tl.transitions.remove(t)
         tl.clips.remove(c)
         tl.retired.append(c.id)
-        return AddClip(asdict(c), restore=True)
+        restore = AddClip(asdict(c), restore=True)
+        if not attached:
+            return restore
+        return Transaction([restore] + [AddTransition(asdict(t)) for t in attached])
 
     def describe(self):
         return f"- {self.clip_id}"
@@ -230,6 +237,9 @@ class SplitClip(Op):
                         "extra": dict(c.extra)})
         c.duration, c.fade_out = self.at - c.start, 0.0
         tl.clips.insert(tl.clips.index(c) + 1, right)
+        for t in tl.transitions:                    # la transition de sortie suit la fin du plan
+            if t.from_clip == c.id:
+                t.from_clip = new_id
         return JoinClips(c.id, new_id, original)
 
     def describe(self):
@@ -252,11 +262,18 @@ class JoinClips(Op):
         if right.parent != left.id or left.end != right.start:
             raise TimelineError(f"{left.id} et {right.id} ne sont pas contigus")
         at = right.start
+        inner = tl.transition_at(left.id, right.id)  # transition posée sur la coupe qu'on referme
+        if inner is not None:
+            tl.transitions.remove(inner)
+        for t in tl.transitions:
+            if t.from_clip == right.id:
+                t.from_clip = left.id
         idx = tl.clips.index(left)
         tl.clips[idx] = _clip_from(self.original)
         tl.clips.remove(right)
         tl.retired.append(right.id)
-        return SplitClip(left.id, at, right.id, restore_id=True)
+        split = SplitClip(left.id, at, right.id, restore_id=True)
+        return split if inner is None else Transaction([split, AddTransition(asdict(inner))])
 
     def describe(self):
         return f"~ {self.left_id} et {self.right_id} réunis"
@@ -386,6 +403,73 @@ class SetProject(Op):
         return "~ projet : " + ", ".join(f"{k}" for k in self.props)
 
 
+# --- transitions -----------------------------------------------------------
+def _transition_writable(tl: Timeline, t: Transition) -> None:
+    _writable(tl, tl.clip(t.from_clip))
+    _writable(tl, tl.clip(t.to_clip))
+
+
+@register
+@dataclass
+class AddTransition(Op):
+    type: ClassVar[str] = "add_transition"
+    transition: dict
+
+    def apply(self, tl):
+        try:
+            t = Transition(**self.transition)
+        except TypeError as exc:
+            raise TimelineError(f"Transition mal formée : {exc}") from exc
+        if any(x.id == t.id for x in tl.transitions):
+            raise TimelineError(f"transition déjà existante : {t.id}")
+        _transition_writable(tl, t)
+        tl.transitions.append(t)
+        return RemoveTransition(t.id)
+
+    def describe(self):
+        t = self.transition
+        return f"+ transition {t['id']} ({t.get('type', 'fade')}, {t.get('duration', 12)} i) {t['from_clip']} → {t['to_clip']}"
+
+
+@register
+@dataclass
+class RemoveTransition(Op):
+    type: ClassVar[str] = "remove_transition"
+    transition_id: str
+
+    def apply(self, tl):
+        t = tl.transition(self.transition_id)
+        _transition_writable(tl, t)
+        tl.transitions.remove(t)
+        return AddTransition(asdict(t))
+
+    def describe(self):
+        return f"- transition {self.transition_id}"
+
+
+@register
+@dataclass
+class SetTransition(Op):
+    """Change le type, la durée (étirer/raccourcir) ou l'alignement (faire glisser) d'une transition."""
+    type: ClassVar[str] = "set_transition"
+    transition_id: str
+    props: dict[str, Any]
+
+    def apply(self, tl):
+        t = tl.transition(self.transition_id)
+        unknown = set(self.props) - {"type", "duration", "align", "params"}
+        if unknown:
+            raise TimelineError(f"propriétés de transition inconnues : {sorted(unknown)}")
+        _transition_writable(tl, t)
+        old = {k: getattr(t, k) for k in self.props}
+        for k, v in self.props.items():
+            setattr(t, k, v)
+        return SetTransition(t.id, old)
+
+    def describe(self):
+        return f"~ transition {self.transition_id} : " + ", ".join(f"{k}={v!r}" for k, v in self.props.items())
+
+
 # --- transaction ----------------------------------------------------------
 @register
 @dataclass
@@ -452,3 +536,38 @@ def trim_head(tl: Timeline, clip_id: str, frames: int) -> TrimClip:
     """Raccourcit (frames > 0) ou rallonge (frames < 0) le début d'un plan ; la fin reste en place."""
     c = tl.clip(clip_id)
     return TrimClip(c.id, c.start + frames, c.duration - frames, c.src_in + frames / tl.fps)
+
+
+def _seconds_or_frames(tl: Timeline, seconds: float | None, frames: int | None) -> int:
+    if (seconds is None) == (frames is None):
+        raise TimelineError("donner la durée soit en secondes, soit en images")
+    n = frames if frames is not None else seconds_to_frames(seconds, tl.fps)
+    if n < 1:
+        raise TimelineError("durée de transition trop courte (moins d'une image)")
+    return n
+
+
+def add_transition(tl: Timeline, from_clip: str, type: str = "fade", *, seconds: float | None = None,
+                   frames: int | None = None, align: str = "center") -> AddTransition:
+    """Pose une transition sur la coupe qui suit `from_clip` (le plan suivant est déduit)."""
+    a = tl.clip(from_clip)
+    nxt = next((c for c in tl.clips_on(a.track) if c.start == a.end), None)
+    if nxt is None:
+        raise TimelineError(f"{from_clip} n'a pas de plan contigu après lui : pas de coupe à adoucir")
+    if seconds is None and frames is None:             # sans durée : valeur par défaut du type
+        frames = DEFAULT_TRANSITION_FRAMES.get(type, 12)
+    t = Transition(tl.next_transition_id(), a.id, nxt.id, type, _seconds_or_frames(tl, seconds, frames), align)
+    return AddTransition(asdict(t))
+
+
+def resize_transition(tl: Timeline, transition_id: str, *, seconds: float | None = None,
+                      frames: int | None = None) -> SetTransition:
+    """Étire / raccourcit une transition (« mets 1 seconde de fondu » ou poignée tirée à la souris)."""
+    tl.transition(transition_id)
+    return SetTransition(transition_id, {"duration": _seconds_or_frames(tl, seconds, frames)})
+
+
+def slide_transition(tl: Timeline, transition_id: str, align: str) -> SetTransition:
+    """Fait glisser la fenêtre par rapport à la coupe : `start`, `center` ou `end`."""
+    tl.transition(transition_id)
+    return SetTransition(transition_id, {"align": align})

@@ -20,7 +20,7 @@ travailleront la souris, le clavier et les prompts (PR C et E) **sans jamais se 
 ## Opérations
 
 `add_track`, `remove_track`, `add_clip`, `remove_clip`, `move_clip`, `trim_clip`, `split_clip` (↔ `join_clips`),
-`shift_clips`, `set_clip_props`, `set_track_props`, `add_marker`, `remove_marker`, `set_project`, `transaction`.
+`shift_clips`, `add_transition`, `remove_transition`, `set_transition`, `set_clip_props`, `set_track_props`, `add_marker`, `remove_marker`, `set_project`, `transaction`.
 Constructeurs : `ripple_delete`, `trim_head`, `trim_tail`.
 
 - `apply(tl)` modifie et **renvoie l'inverse** ; `describe()` donne le diff lisible.

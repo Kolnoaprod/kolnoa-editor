@@ -2,8 +2,7 @@
 
 **Confirmé par l'utilisateur** : des fondus et des transitions avec flash, « des choses simples », dans un
 montage cinématographique haut de gamme, fluide, sans jump cuts agressifs. Pas d'effets compliqués.
-Les durées par défaut et les règles d'emploi ci-dessous sont des **propositions à valider** (cf. issue #1) :
-aucune durée n'est figée tant qu'elle n'a pas été vue à l'œil sur un vrai film.
+Les durées par défaut sont **confirmées** ; les règles d'emploi ci-dessous restent des **propositions à valider** (cf. issue #1).
 
 ## Catalogue volontairement court
 
@@ -18,6 +17,24 @@ aucune durée n'est figée tant qu'elle n'a pas été vue à l'œil sur un vrai 
 
 Hors catalogue tant que l'utilisateur ne le demande pas : glissés, whip pan, zoom, glitch, volets.
 Le modèle est conçu pour les accueillir plus tard sans changer le schéma (type de transition = simple texte).
+
+## Manipulation : glisser, étirer, ou le dire (confirmé par l'utilisateur)
+
+Une transition est un **objet posé sur une coupe**, pas un réglage caché :
+
+- **À la souris (PR C)** : on la glisse depuis le catalogue sur une coupe ; on **étire ou raccourcit** ses poignées ;
+  on la **fait glisser** pour qu'elle commence sur la coupe, soit centrée, ou finisse sur la coupe.
+- **Par prompt (PR E)** : « mets 1 seconde de fondu entre ces deux plans », « allonge le flash », « fais finir le
+  fondu sur la coupe » produisent exactement les mêmes opérations que la souris.
+- Ces gestes sont déjà dans le modèle (PR « transitions » empilée sur #5) : `add_transition`, `resize_transition`
+  (en secondes **ou** en images), `slide_transition` (`center` / `start` / `end`), `RemoveTransition`, tous réversibles,
+  verrouillables, journalisés. CLI : `kolnoa timeline-transition $M s001 --type fade --seconds 0.8 --align end`.
+- Durée toujours en images entières, plafonnée à la moitié du plus court des deux plans (message clair sinon) ;
+  la transition **ne change jamais la durée du film**.
+- Une coupe sous transition ne se déplace pas par accident : modifier les plans voisins est refusé tant que la
+  transition n'est pas retirée (ou ajustée dans la même action). Supprimer un plan emporte ses transitions, l'annulation les rend.
+- Le **rendu** de ces transitions (xfade, flash, poignées de média nécessaires de part et d'autre de la coupe) reste
+  en PR D ; `timeline-render` les signale aujourd'hui comme non rendues plutôt que de les ignorer en silence.
 
 ## Réalisation technique avec ffmpeg 6.1 (vérifié)
 
@@ -34,15 +51,10 @@ Le modèle est conçu pour les accueillir plus tard sans changer le schéma (typ
 5. **Aperçu = export** : même chaîne de filtres pour le proxy et le rendu final (critère SSIM de la PR D).
 6. Réversible et verrouillable comme le reste : `set_transition` / `remove_transition`, refusées sur un plan verrouillé.
 
-## Valeurs de départ à tester (hypothèses, non confirmées)
+## Durées par défaut (confirmées par l'utilisateur)
 
 Fondu enchaîné : environ 0,5 s (12 images à 25 i/s) ; fondu au noir : 0,8 à 1 s ; flash : 4 à 6 images au total.
 À régler sur de vrais rushes puis à figer ici une fois validées.
-
-## Questions ouvertes (une seule vraiment utile)
-
-- Quelle durée te paraît juste pour le fondu enchaîné et pour le flash ? On teste les valeurs de départ sur un
-  extrait et on ajuste à l'œil.
 
 ## Plan technique (PR D)
 
