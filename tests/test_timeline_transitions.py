@@ -208,3 +208,10 @@ def test_random_transition_edits_always_undo(tmp_path):
             execute(tl, inv)
         end = tl.canonical()
         assert {**end, "retired": []} == {**start, "retired": []}
+
+
+def test_default_durations_when_none_is_given():
+    tl = tl3()
+    execute(tl, add_transition(tl, "s001", "flash"))
+    execute(tl, add_transition(tl, "s002", "fade"))
+    assert [t.duration for t in tl.transitions] == [6, 12]

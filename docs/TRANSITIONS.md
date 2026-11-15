@@ -57,10 +57,9 @@ Une transition est un **objet posé sur une coupe**, pas un réglage caché :
 Fondu enchaîné : environ 0,5 s (12 images à 25 i/s) ; fondu au noir : 0,8 à 1 s ; flash : 4 à 6 images au total.
 À régler sur de vrais rushes puis à figer ici une fois validées.
 
-## Questions ouvertes (une seule vraiment utile)
+## Question ouverte
 
-- Quelle durée te paraît juste pour le fondu enchaîné et pour le flash ? On teste les valeurs de départ sur un
-  extrait et on ajuste à l'œil.
+- Durée par défaut du fondu enchaîné et du fondu au noir ? (flash : 6 images, réglé.)
 
 ## Plan technique (PR D)
 

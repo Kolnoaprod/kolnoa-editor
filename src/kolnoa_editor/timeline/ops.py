@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, ClassVar
 
-from .model import (AUDIO_MODES, Clip, LockedError, Marker, Timeline, TimelineError, Track, Transition)
+from .model import (AUDIO_MODES, DEFAULT_TRANSITION_FRAMES, Clip, LockedError, Marker, Timeline, TimelineError, Track, Transition)
 from .timebase import seconds_to_frames
 
 _REGISTRY: dict[str, type] = {}
@@ -554,6 +554,8 @@ def add_transition(tl: Timeline, from_clip: str, type: str = "fade", *, seconds:
     nxt = next((c for c in tl.clips_on(a.track) if c.start == a.end), None)
     if nxt is None:
         raise TimelineError(f"{from_clip} n'a pas de plan contigu après lui : pas de coupe à adoucir")
+    if seconds is None and frames is None:             # sans durée : valeur par défaut du type
+        frames = DEFAULT_TRANSITION_FRAMES.get(type, 12)
     t = Transition(tl.next_transition_id(), a.id, nxt.id, type, _seconds_or_frames(tl, seconds, frames), align)
     return AddTransition(asdict(t))
 

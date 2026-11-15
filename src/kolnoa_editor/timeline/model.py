@@ -18,6 +18,9 @@ TRACK_KINDS = {"video", "audio"}
 AUDIO_MODES = {"source", "mute"}
 MARKER_KINDS = {"note", "beat", "phrase", "sync", "chapter", "keep"}  # keep = zone à ne pas couper
 TRANSITION_TYPES = {"fade", "fadeblack", "fadewhite", "flash"}   # catalogue simple (docs/TRANSITIONS.md)
+# Durées par défaut en images. flash = 6 : confirmé par l'utilisateur. Les fondus (12 i = 0,5 s à 25 i/s) restent
+# une hypothèse de départ à valider à l'œil sur un vrai film.
+DEFAULT_TRANSITION_FRAMES = {"flash": 6, "fade": 12, "fadeblack": 20, "fadewhite": 12}
 TRANSITION_ALIGN = {"center", "start", "end"}   # position de la fenêtre par rapport à la coupe
 _TRANSITION_ID = re.compile(r"^t(\d+)$")
 _CLIP_ID = re.compile(r"^s(\d+)$")

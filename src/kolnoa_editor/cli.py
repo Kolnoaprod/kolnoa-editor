@@ -198,8 +198,6 @@ def cmd_tl_transition(args) -> int:
             raise TimelineError(f"aucune transition après {args.clip}")
         lines = s.do(RemoveTransition(existing.id))
     elif existing is None:
-        if args.seconds is None and args.frames is None:
-            raise TimelineError("donner une durée : --seconds ou --frames")
         lines = s.do(add_transition(tl, a.id, args.type or "fade", seconds=args.seconds, frames=args.frames,
                                     align=args.align or "center"))
     else:
