@@ -17,6 +17,30 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 - **Éditeur manuel, par étapes** : lecture et sélection, puis coupes / déplacements / changement d'angle, puis audio, vitesse, transitions, couleur.
 - **Hors ligne** : les opérations manuelles marchent sans clé API ; les fournisseurs d'IA sont optionnels.
 
+## 1 ter. Flux de travail et exigences de la timeline manuelle
+### Flux
+1. **Synchro** (onglet Synchro) puis **vérification** : vue de contrôle (formes d'onde superposées, comparaison image par image, `multicam-nudge`) ; rien n'est utilisable tant qu'un angle « incertain » n'est pas accepté.
+2. **Multicam**, au choix : à la main (touches numériques) ou par prompt (l'IA pose les coupes d'angle sur la timeline) ; dans les deux cas le résultat est visible et retouchable sur la timeline.
+
+### Multicam à la main
+- Touches `1`…`9` : coupe vers l'angle correspondant à la position de la tête de lecture, en lecture ou à l'arrêt (opération équivalente à `multicam-at`).
+- L'audio est une piste à part, indépendante des angles ; changer d'angle ne change jamais le son.
+
+### Audio
+- Pistes audio séparées ; mono → dual mono (ou mono vers stéréo), niveaux par clip et par piste, fondus d'entrée/sortie, fondu enchaîné audio ; rendu via ffmpeg (`pan`, `volume`, `afade`, `acrossfade`).
+- Mixage de la musique et du son de l'enregistreur sur des pistes distinctes.
+
+### Chutier et plans de coupe
+- Chutier des rushes avec lecture, marques `I` / `O`, création d'un sous-clip ; glisser-déposer sur la timeline.
+- Les sous-clips pointent vers le rush d'origine (jamais copié ni modifié).
+
+### Placement et indépendance des pistes
+- Par défaut, déplacer ou poser un plan sur une autre piste que la piste multicam ne décale rien, ni avant ni après.
+- Aimantation (magnet) activable : bords des clips, coupes, marqueurs, tête de lecture.
+- Modes d'édition explicites : **écraser** (par défaut), **insérer** (décale la suite sur la piste visée), ripple activable et désactivable ; verrou par piste.
+- Compensation : rallonger ou raccourcir le plan précédent ou suivant (poignées, limitées par la durée du rush source), pour combler ou absorber un plan intercalé.
+- Un clip posé à la main devient un verrou que les prompts respectent.
+
 ## 2. Couche « tâches en arrière-plan » (commune)
 - `TaskRunner` : exécute une tâche longue dans un processus ou un thread séparé, avec progression (`current/total`, libellé), annulation coopérative et journal.
 - Les analyses de calibration et de synchro émettent des événements de progression (paire, fenêtre) ; l'interface ne fait que les afficher.
