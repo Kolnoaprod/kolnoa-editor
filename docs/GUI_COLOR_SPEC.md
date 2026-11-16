@@ -1,4 +1,4 @@
-# Spec — interface (synchro, calibration) et couleur par angle
+# Spec — interface prompt-first : montage, synchro, calibration, couleur par angle
 
 Statut : proposition à valider (aucun code). Maquette visuelle : voir la conversation Claude / ChatGPT.
 
@@ -6,6 +6,15 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 - Timeline non destructive : tout réglage (synchro, couleur) est une opération enregistrée dans le projet ; les médias d'origine ne sont jamais écrits.
 - Même cœur pour la ligne de commande et l'interface : l'interface appelle les fonctions de `sync/` et `sync/calibrate.py`, sans logique dupliquée.
 - Un résultat « incertain » n'est jamais appliqué sans action explicite.
+
+## 1 bis. Montage prompt-first avec retouches ancrées
+- Par défaut tout se fait par prompt ; l'éditeur sert à regarder et à retoucher complètement à la main.
+- **Retouche ancrée** : l'utilisateur avance dans l'aperçu, s'arrête, écrit un prompt (« ici, passe sur CAM 2 », « raccourcis ce silence ») ; il est rattaché au plan source et au temps (`comments.py`), pas au temps du rendu.
+- **File de retouches** : plusieurs retouches peuvent être posées à la suite ; elles s'exécutent ensuite en lot (bouton « Appliquer les retouches »), chacune restant `open`, `done` ou `orphan`.
+- **Diff avant validation** : le lot produit une liste d'opérations lisible (durée avant/après, verrous respectés) ; validation totale, partielle ou refus ; chaque validation crée une version comparable.
+- **Parité** : toute action manuelle est une opération ; toute opération de l'IA est modifiable à la main ; ce qui est posé à la main devient un verrou que l'IA ne défait pas au prompt suivant.
+- **Éditeur manuel, par étapes** : lecture et sélection, puis coupes / déplacements / changement d'angle, puis audio, vitesse, transitions, couleur.
+- **Hors ligne** : les opérations manuelles marchent sans clé API ; les fournisseurs d'IA sont optionnels.
 
 ## 2. Couche « tâches en arrière-plan » (commune)
 - `TaskRunner` : exécute une tâche longue dans un processus ou un thread séparé, avec progression (`current/total`, libellé), annulation coopérative et journal.
@@ -37,14 +46,18 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 ### Hors périmètre initial
 - Étalonnage par masques, courbes, suivi, scopes avancés.
 
-## 5. Découpage proposé des PR
-1. PR C0 : modèle `color_grade` + ops + CLI (`color-set`, `color-lut`, `color-match`) + rendu ffmpeg + tests ; aucune interface.
+## 5. Découpage proposé des PR (à valider ; modifie l'ordre D/E d'origine)
+1. PR C0 : modèle `color_grade` + ops + CLI + rendu ffmpeg + tests (sans interface).
 2. PR C1 : `TaskRunner` + onglet Synchro / Calibration.
-3. PR C2 : onglet Couleur (aperçu avant/après, curseurs, LUT, harmonisation).
-4. PR D : rendu multicam, transitions, compensation de dérive (inchangé).
+3. PR C2 : onglet Montage (aperçu, timeline en lecture et sélection, barre de prompt, retouches ancrées, file et diff).
+4. PR E1 : prompts → opérations (montage de base, retouches par lot) ; les 6 prompts d'acceptation de l'issue #2 servent de tests de bout en bout.
+5. PR C3 : édition manuelle de la timeline (coupes, déplacements, angles), puis audio / vitesse / transitions.
+6. PR C4 : onglet Couleur.
+7. PR D : rendu multicam, transitions, compensation de dérive.
 
 ## 6. Questions ouvertes
 - Boîte à outils graphique (Qt ou interface web locale) : à trancher avant C1.
 - Détection fiable du profil Sony (S-Cinetone, S-Log3) via les métadonnées.
 - Profil et espace colorimétrique des images de drone.
+- Qualité des analyses locales (paroles, scènes, musique) : à mesurer sur de vrais rushes avant de promettre un montage automatique.
 - Où stocker les LUT (projet ou bibliothèque partagée) et gestion de leur licence.
