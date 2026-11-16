@@ -23,6 +23,7 @@ USABLE_STATUSES = {"reference", "ok", "manual"}     # seuls états utilisables s
 _GROUP_ID = re.compile(r"^g(\d+)$")
 _CLIP_ID = re.compile(r"^s(\d+)$")
 _MARKER_ID = re.compile(r"^m(\d+)$")
+_LINK_ID = re.compile(r"^l(\d+)$")
 
 
 class TimelineError(ValueError):
@@ -61,6 +62,7 @@ class Clip:
     parent: str | None = None    # filiation (scission)
     group: str | None = None     # groupe multicam : le plan montre un angle du groupe, son audio vient du maître
     angle: str | None = None
+    link: str | None = None      # plans liés (image + son) : coupés, déplacés et supprimés ensemble tant qu'ils partagent ce id
     extra: dict[str, Any] = field(default_factory=dict)  # réservé (transitions, effets, étalonnage)
 
     @property
@@ -193,6 +195,10 @@ class Timeline:
     def next_clip_id(self) -> str:
         nums = [int(m.group(1)) for i in self._used_clip_ids() if (m := _CLIP_ID.match(i))]
         return f"s{max(nums, default=0) + 1:03d}"
+
+    def next_link_id(self) -> str:
+        nums = [int(m.group(1)) for c in self.clips if c.link and (m := _LINK_ID.match(c.link))]
+        return f"l{max(nums, default=0) + 1:03d}"
 
     def next_marker_id(self) -> str:
         nums = [int(m.group(1)) for mk in self.markers if (m := _MARKER_ID.match(mk.id))]

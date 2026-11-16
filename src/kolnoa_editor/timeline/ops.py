@@ -227,7 +227,7 @@ class SplitClip(Op):
         original = asdict(c)
         offset = (self.at - c.start) / tl.fps
         right = Clip(**{**original, "id": new_id, "start": self.at, "duration": c.end - self.at,
-                        "src_in": round(c.src_in + offset, 6), "fade_in": 0.0, "parent": c.id,
+                        "src_in": round(c.src_in + offset, 6), "fade_in": 0.0, "parent": c.id, "link": None,
                         "extra": dict(c.extra)})
         c.duration, c.fade_out = self.at - c.start, 0.0
         tl.clips.insert(tl.clips.index(c) + 1, right)
@@ -282,7 +282,29 @@ class ShiftClips(Op):
         return f"~ {len(self.clip_ids)} plan(s) décalé(s) de {self.delta} i"
 
 
-_CLIP_PROPS = {"audio", "fade_in", "fade_out", "gain_db", "note", "label", "locked", "extra", "media"}
+@register
+@dataclass
+class ShiftAfter(Op):
+    """Décale de `delta` images tous les plans des pistes données qui commencent à `from_frame` ou après
+    (ripple). Les plans concernés sont déterminés à l'application : l'inverse reçoit leur liste exacte."""
+    type: ClassVar[str] = "shift_after"
+    tracks: list[str]
+    from_frame: int
+    delta: int
+
+    def apply(self, tl):
+        clips = [c for t in self.tracks for c in tl.clips_on(t) if c.start >= self.from_frame]
+        for c in clips:
+            _writable(tl, c)
+        for c in clips:
+            c.start += self.delta
+        return ShiftClips([c.id for c in clips], -self.delta)
+
+    def describe(self):
+        return f"~ après l'image {self.from_frame} sur {', '.join(self.tracks)} : décalage de {self.delta} i"
+
+
+_CLIP_PROPS = {"audio", "fade_in", "fade_out", "gain_db", "note", "label", "locked", "extra", "media", "link"}
 
 
 @register
