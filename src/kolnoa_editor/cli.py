@@ -413,6 +413,65 @@ def cmd_sync_calibrate(args) -> int:
     return 0 if res["unchanged"] else 3
 
 
+def cmd_audio_measure(args) -> int:
+    """Mesure de qualité sonore de fichiers (LECTURE SEULE) : sert à recaler les seuils sur de vrais rushes."""
+    from dataclasses import asdict
+    from .timeline import measure_audio
+    rows = []
+    for f in args.files:
+        m = measure_audio(Path(f), args.start, args.duration)
+        rows.append(asdict(m))
+        print(f"{Path(f).name}: sonie {m.integrated_lufs} LUFS, crête vraie {m.true_peak_dbtp} dBTP, fond {m.noise_floor_dbfs} dBFS, "
+              f"contraste {m.contrast_db} dB, saturation {m.clip_ratio:.5f}, silence {m.silence_ratio:.2f}, "
+              f"{m.channels} canal/canaux {m.sample_rate} Hz")
+    if args.out:
+        Path(args.out).write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+    return 0
+
+
+def cmd_audio_propose(args) -> int:
+    """Propose la meilleure source audio d'une séquence. N'APPLIQUE RIEN : `audio-master` applique, après validation humaine."""
+    from .timeline import propose_master
+    project = _project(args)
+    prop = propose_master(_session(project).tl, args.group, args.start, args.end, project.root,
+                          args.source or None)
+    print("\n".join(prop.explain()))
+    return 0
+
+
+def cmd_audio_master(args) -> int:
+    from .timeline import assign_master, clear_master
+    if not args.clear and not args.source:
+        raise TimelineError("indiquer la source (ou --clear pour revenir au maître du groupe)")
+    s = _session(_project(args))
+    op = clear_master(s.tl, args.group, args.start, args.end) if args.clear else \
+        assign_master(s.tl, args.group, args.start, args.end, args.source, args.reason or "")
+    for line in s.do(op):
+        print(line)
+    return 0
+
+
+def cmd_audio_mix(args) -> int:
+    from .timeline import render_mix, set_audio_settings
+    project = _project(args)
+    tl = _session(project).tl.copy()
+    props = {k: v for k, v in (("target_lufs", args.lufs), ("ceiling_dbtp", args.ceiling)) if v is not None}
+    if props:
+        execute(tl, set_audio_settings(tl, **props))             # sur une copie : la timeline de la session n'est pas touchée
+    out = Path(args.out)
+    if out.exists() and not args.force:
+        raise TimelineError(f"{out} existe déjà (--force pour remplacer)")
+    rep = render_mix(tl, project.root, out)
+    print(f"Mixage écrit : {out} ({rep.duration:.1f} s, {rep.events} événement(s), {rep.sample_rate} Hz)")
+    fmt = lambda v: "non mesurable" if v is None else f"{v:.1f}"          # noqa: E731
+    print(f"Sonie {fmt(rep.before.integrated_lufs)} → {fmt(rep.after.integrated_lufs)} LUFS ; crête vraie "
+          f"{fmt(rep.before.true_peak_dbtp)} → {fmt(rep.after.true_peak_dbtp)} dBTP ; gain {rep.gain_applied_db:+.1f} dB ; "
+          f"limiteur {'intervenu' if rep.limiter else 'non nécessaire'}")
+    for w in rep.warnings:
+        print(f"ATTENTION : {w}", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kolnoa", description="Kolnoa Editor")
     p.add_argument("--version", action="version", version=__version__)
@@ -534,6 +593,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--truth", help="JSON de repères posés à la main : [{ref, sig, t_ref, t_sig}]")
     s.add_argument("--tz", default="Europe/Paris", help="fuseau des noms de fichiers horodatés")
     s.set_defaults(func=cmd_sync_calibrate)
+
+    s = sub.add_parser("audio-measure", help="Mesure la qualité sonore de fichiers (LECTURE SEULE)")
+    s.add_argument("files", nargs="+")
+    s.add_argument("--start", type=float, default=0.0)
+    s.add_argument("--duration", type=float)
+    s.add_argument("--out", help="écrit les mesures en JSON")
+    s.set_defaults(func=cmd_audio_measure)
+    s = add("audio-propose", "Propose la meilleure source audio d'une séquence (n'applique rien)", cmd_audio_propose)
+    s.add_argument("group"); s.add_argument("start", type=float); s.add_argument("end", type=float)
+    s.add_argument("--source", action="append", help="limiter aux angles donnés")
+    s = add("audio-master", "Choisit (ou efface) la source audio d'une séquence", cmd_audio_master)
+    s.add_argument("group"); s.add_argument("start", type=float); s.add_argument("end", type=float)
+    s.add_argument("source", nargs="?"); s.add_argument("--reason"); s.add_argument("--clear", action="store_true")
+    s = add("audio-mix", "Rend le mixage audio de la timeline en WAV (sonie/limiteur mesurés)", cmd_audio_mix)
+    s.add_argument("out"); s.add_argument("--lufs", type=float, help="cible de sonie intégrée"); s.add_argument("--ceiling", type=float)
+    s.add_argument("--force", action="store_true")
 
     add("clean-cache", "Vide le cache de segments (jamais les rushes ni les rendus)", cmd_clean_cache)
     return p
