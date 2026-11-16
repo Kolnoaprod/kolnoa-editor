@@ -30,6 +30,17 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 - Pistes audio séparées ; mono → dual mono (ou mono vers stéréo), niveaux par clip et par piste, fondus d'entrée/sortie, fondu enchaîné audio ; rendu via ffmpeg (`pan`, `volume`, `afade`, `acrossfade`).
 - Mixage de la musique et du son de l'enregistreur sur des pistes distinctes.
 
+### Choix de la piste audio
+- Pour chaque groupe multicam, le logiciel **propose** la meilleure source audio d'après des mesures sur les pistes synchronisées : niveau et plage dynamique, bruit de fond, saturation (clipping), silences, bande passante, présence de parole ; le score est indicatif et les mesures sont affichées.
+- L'utilisateur peut **imposer** sa piste préférée (par groupe, par scène ou pour tout le projet) ; ce choix devient un verrou que les prompts respectent.
+- Les pistes des caméras servent de repère (« guide ») quand elles sont exploitables ; sinon elles sont ignorées pour le son.
+- Le traitement suit la source retenue : normalisation du niveau, mono → dual mono, fondus ; réduction de bruit seulement si demandée.
+
+### Outil lame de rasoir et raccourcissement
+- Rasoir : coupe l'image **et** le son liés au même instant (clips liés par défaut) ; option pour couper une seule piste, ou toutes les pistes.
+- Raccourcir un passage : retirer la portion entre deux coupes avec ou sans ripple, ou ajuster les bords (trim) ; l'image et le son restent synchronisés tant que les clips sont liés.
+- Même opération par prompt (« raccourcis ce passage de 30 s sans couper les paroles »), avec diff avant validation.
+
 ### Chutier et plans de coupe
 - Chutier des rushes avec lecture, marques `I` / `O`, création d'un sous-clip ; glisser-déposer sur la timeline.
 - Les sous-clips pointent vers le rush d'origine (jamais copié ni modifié).
