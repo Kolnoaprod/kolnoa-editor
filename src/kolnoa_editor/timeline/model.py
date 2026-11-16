@@ -24,6 +24,7 @@ _GROUP_ID = re.compile(r"^g(\d+)$")
 _CLIP_ID = re.compile(r"^s(\d+)$")
 _MARKER_ID = re.compile(r"^m(\d+)$")
 _LINK_ID = re.compile(r"^l(\d+)$")
+_SUB_ID = re.compile(r"^b(\d+)$")
 
 
 class TimelineError(ValueError):
@@ -76,6 +77,24 @@ class Marker:
     frame: int
     kind: str = "note"
     text: str = ""
+
+
+@dataclass
+class Subclip:
+    """Plan court du chutier : une plage [src_in, src_out] (secondes) d'un rush, repérée avec I et O.
+    N'est PAS sur la timeline : on le glisse ensuite sur une piste (voir `place_subclip`). Ne copie ni ne modifie le média."""
+    id: str
+    media: str
+    src_in: float
+    src_out: float
+    name: str = ""
+    kind: str = "video"              # 'video' | 'audio'
+    tags: list[str] = field(default_factory=list)   # ex. « coupe », « ambiance », « émotion »
+    note: str = ""
+
+    @property
+    def length(self) -> float:
+        return self.src_out - self.src_in
 
 
 @dataclass
@@ -133,6 +152,7 @@ class Timeline:
     clips: list[Clip] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
     groups: list[MulticamGroup] = field(default_factory=list)
+    bin: list[Subclip] = field(default_factory=list)       # chutier : plans courts repérés I/O
     retired: list[str] = field(default_factory=list)
     schema: int = SCHEMA
 
@@ -154,6 +174,16 @@ class Timeline:
             if m.id == marker_id:
                 return m
         raise TimelineError(f"Repère inconnu : {marker_id}")
+
+    def subclip(self, sub_id: str) -> Subclip:
+        for b in self.bin:
+            if b.id == sub_id:
+                return b
+        raise TimelineError(f"Plan du chutier inconnu : {sub_id}")
+
+    def next_subclip_id(self) -> str:
+        nums = [int(m.group(1)) for b in self.bin if (m := _SUB_ID.match(b.id))]
+        return f"b{(max(nums) + 1 if nums else 1):03d}"
 
     def group(self, group_id: str) -> MulticamGroup:
         for g in self.groups:
@@ -253,6 +283,7 @@ class Timeline:
                     raise TimelineError(f"chevauchement sur {tid} : {prev.id} et {c.id}")
                 prev = c
         self._validate_groups()
+        self._validate_bin()
         mseen: set[str] = set()
         for m in self.markers:
             if m.id in mseen:
@@ -260,6 +291,17 @@ class Timeline:
             mseen.add(m.id)
             if m.frame < 0 or m.kind not in MARKER_KINDS:
                 raise TimelineError(f"{m.id}: repère invalide")
+
+    def _validate_bin(self) -> None:
+        seen: set[str] = set()
+        for b in self.bin:
+            if b.id in seen:
+                raise TimelineError(f"id de chutier en double : {b.id}")
+            seen.add(b.id)
+            if b.kind not in ("video", "audio"):
+                raise TimelineError(f"{b.id}: type de plan de chutier inconnu : {b.kind!r}")
+            if not (0 <= b.src_in < b.src_out):
+                raise TimelineError(f"{b.id}: plage I/O invalide [{b.src_in}, {b.src_out}]")
 
     def _validate_groups(self) -> None:
         gseen: set[str] = set()
@@ -313,6 +355,7 @@ class Timeline:
         d["clips"] = sorted(d["clips"], key=lambda c: (c["track"], c["start"], c["id"]))
         d["markers"] = sorted(d["markers"], key=lambda m: (m["frame"], m["id"]))
         d["groups"] = sorted(d["groups"], key=lambda g: g["id"])
+        d["bin"] = sorted(d["bin"], key=lambda b: b["id"])
         d["retired"] = sorted(d["retired"])
         return d
 
@@ -331,6 +374,7 @@ class Timeline:
                 groups=[MulticamGroup(id=g["id"], master=g["master"], name=g.get("name", ""),
                                       angles=[Angle(**a) for a in g.get("angles", [])])
                         for g in d.get("groups", [])],
+                bin=[Subclip(**b) for b in d.get("bin", [])],
                 retired=list(d.get("retired", [])), schema=int(d["schema"]),
             )
         except (KeyError, TypeError) as exc:

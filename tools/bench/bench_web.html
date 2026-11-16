@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Kolnoa — essai de performance (web local)</title>
+<style>
+ body{font:14px system-ui;background:#16181d;color:#e6e6e6;margin:20px;max-width:900px}
+ button,input{font:inherit;margin:4px 0}
+ pre{background:#0d0f13;padding:12px;border-radius:6px;white-space:pre-wrap}
+ canvas{background:#0d0f13;width:100%;height:160px;display:block;margin:8px 0}
+</style>
+<h2>Essai de performance : interface web locale</h2>
+<p>Ne modifie rien, n'envoie rien. Choisis 3 fichiers vidéo (de préférence des proxys ou rushes courts, un par caméra). Tout reste dans le navigateur.</p>
+<input id="f" type="file" accept="video/*" multiple><br>
+<button id="go">Lancer l'essai</button>
+<canvas id="c" width="1800" height="320"></canvas>
+<video id="v0" muted playsinline style="width:30%"></video><video id="v1" muted playsinline style="width:30%"></video><video id="v2" muted playsinline style="width:30%"></video>
+<pre id="out">En attente.</pre>
+<script>
+const out = document.getElementById('out'), res = {};
+const log = () => out.textContent = JSON.stringify(res, null, 2);
+const pct = (a, p) => { a = [...a].sort((x, y) => x - y); return +a[Math.min(a.length - 1, Math.floor(a.length * p))].toFixed(2); };
+res.navigateur = navigator.userAgent; res.coeurs = navigator.hardwareConcurrency;
+
+// 1) Timeline de 800 plans : coût de redessin pendant un défilement/zoom
+function timelineTest(N) {
+  const c = document.getElementById('c'), g = c.getContext('2d');
+  const clips = Array.from({length: N}, (_, i) => ({s: i * 90, d: 80 + (i % 7) * 4, t: i % 4}));
+  const times = [];
+  for (let f = 0; f < 240; f++) {
+    const t0 = performance.now(), zoom = 0.2 + (f % 60) / 60, off = f * 150;
+    g.clearRect(0, 0, c.width, c.height);
+    for (const k of clips) {
+      const x = (k.s - off) * zoom; if (x > c.width || x + k.d * zoom < 0) continue;
+      g.fillStyle = ['#3b6ea8', '#5a8f4a', '#a8623b', '#7b5aa8'][k.t]; g.fillRect(x, 10 + k.t * 70, Math.max(1, k.d * zoom - 1), 60);
+    }
+    times.push(performance.now() - t0);
+  }
+  res['timeline_' + N + '_plans_ms'] = {mediane: pct(times, .5), p95: pct(times, .95), max: pct(times, 1)};
+}
+
+// 2) Changement d'angle : délai entre la « touche » et l'image du nouvel angle affichée
+async function angleTest(files) {
+  const vids = [0, 1, 2].map(i => document.getElementById('v' + i));
+  files.slice(0, 3).forEach((f, i) => { vids[i].src = URL.createObjectURL(f); });
+  await Promise.all(vids.slice(0, files.length).map(v => new Promise(r => v.onloadeddata = r)));
+  const lat = [];
+  for (let i = 0; i < 30; i++) {
+    const v = vids[i % files.length], t = 1 + (i * 0.37) % Math.max(1, (v.duration || 5) - 2);
+    const t0 = performance.now();
+    await new Promise(r => { v.onseeked = r; v.currentTime = t; });
+    await new Promise(r => requestAnimationFrame(() => r()));
+    lat.push(performance.now() - t0);
+  }
+  res.angle_seek_ms = {mediane: pct(lat, .5), p95: pct(lat, .95), max: pct(lat, 1)};
+  // lecture simultanée des angles : images réellement présentées par seconde
+  const n = Math.min(3, files.length); let frames = 0;
+  vids.slice(0, n).forEach(v => { v.currentTime = 0; v.play(); });
+  const t0 = performance.now();
+  await new Promise(r => { const tick = () => { frames++; performance.now() - t0 < 3000 ? requestAnimationFrame(tick) : r(); }; tick(); });
+  const q = vids.slice(0, n).map(v => v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {});
+  res.lecture_simultanee = {angles: n, rafraichissement_fps: +(frames / 3).toFixed(1),
+    images_perdues: q.map(x => x.droppedVideoFrames), images_total: q.map(x => x.totalVideoFrames)};
+  vids.forEach(v => v.pause());
+}
+
+document.getElementById('go').onclick = async () => {
+  res.etat = 'en cours'; log();
+  timelineTest(200); timelineTest(800); log();
+  const files = [...document.getElementById('f').files];
+  if (files.length) await angleTest(files); else res.angle = 'aucun fichier choisi : test des angles ignoré';
+  res.etat = 'terminé : copie ce texte et envoie-le'; log();
+};
+</script>

@@ -151,14 +151,15 @@ def _make_room_insert(tl: Timeline, tracks: list[str], at: int, length: int, exc
     return ops
 
 
-def place_clip(tl: Timeline, clip: Clip | dict, mode: str = "overwrite", ripple_tracks: list[str] | None = None) -> Transaction:
+def place_clip(tl: Timeline, clip: Clip | dict, mode: str = "overwrite", ripple_tracks: list[str] | None = None,
+               _ids: "_Ids | None" = None) -> Transaction:
     """Pose un nouveau plan. `overwrite` : il recouvre ce qui se trouve dessous (rien d'autre ne bouge).
     `insert` : la suite est décalée vers la droite sur la piste visée (et sur `ripple_tracks` en plus)."""
     c = Clip(**clip) if isinstance(clip, dict) else clip
     if mode not in MODES:
         raise TimelineError(f"mode inconnu : {mode!r} (valeurs : {', '.join(MODES)})")
     tl.track(c.track)
-    ids = _Ids(tl)
+    ids = _ids or _Ids(tl)          # `_ids` partagé : plusieurs poses d'une même action ne se disputent pas les ids
     if mode == "overwrite":
         ops = _clear_span(tl, c.track, c.start, c.end, set(), ids)
     else:
