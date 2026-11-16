@@ -10,3 +10,7 @@ venv/
 *.mp4
 *.mov
 *.wav
+tools/bench/exe/ffmpeg_bin/
+tools/bench/exe/dist/
+tools/bench/exe/build/
+*.spec

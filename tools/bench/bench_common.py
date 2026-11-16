@@ -178,12 +178,65 @@ def render_report(results: dict) -> str:
         if errs:
             lines += ["", "Erreurs / avertissements :"] + [f"- {e}" for e in errs]
         lines.append("")
+    detail = results.get("rounds_detail")
+    if detail:
+        lines += ["## Tours individuels", "", f"{len({r.get('round') for r in detail})} tours ; chiffres ci-dessus = médiane des tours (pire p95/max).", "",
+                  "| Tour | Outil | Médias | Lancement (s) | Lecture/pause (ms, méd.) | Scrub (ms, méd.) | Erreurs |", "|---|---|---|---|---|---|---|"]
+        for r in detail:
+            m = r.get("metrics", {})
+            g = lambda k: (m.get(k) or {}).get("mediane", NM) if isinstance(m.get(k), dict) else (m.get(k) if m.get(k) is not None else NM)
+            lines.append(f"| {r.get('round')} | {r['toolkit']} | {r['variant']} | {g('startup_s')} | {g('play_pause_ms')} | {g('scrub_ms')} | {len(r.get('errors', []))} |")
+        lines.append("")
     lines += ["## Limites", "",
-              "- Une seule machine, une seule session ; répéter 3 fois et comparer avant de conclure.",
+              "- Une seule machine ; plusieurs tours dans une même session (voir plus haut), pas de comparaison entre machines.",
               "- CPU/RAM de Qt : processus Python ; du web : tous les processus du navigateur de l'essai (profil dédié).",
               "- Le GPU n'est lu que via `nvidia-smi` quand il existe.",
               "- Emballage Windows (taille, démarrage à froid, installeur) : à évaluer à part, voir le README.", ""]
     return "\n".join(lines)
+
+
+# --- agrégation de plusieurs tours -------------------------------------------------------------------
+def _median(xs: list[float]) -> float:
+    xs = sorted(xs)
+    n = len(xs)
+    return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2
+
+
+def _merge_metric(vals: list):
+    """Fusionne la même mesure sur plusieurs tours : médiane des médianes, pire p95/max, n cumulé. Autres valeurs : médiane si numérique."""
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return None
+    if all(isinstance(v, dict) and "mediane" in v for v in vals):
+        return {"n": sum(v["n"] for v in vals), "mediane": round(_median([v["mediane"] for v in vals]), 2),
+                "p95": max(v["p95"] for v in vals), "max": max(v["max"] for v in vals)}
+    if all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in vals):
+        return round(_median(vals), 3)
+    if all(isinstance(v, dict) for v in vals):
+        keys = {k for v in vals for k in v}
+        return {k: _merge_metric([v.get(k) for v in vals]) for k in sorted(keys)}
+    return vals[len(vals) // 2]
+
+
+def aggregate_rounds(results: dict) -> dict:
+    """Un seul `run` par (outil, variante) : médiane des tours. Les tours individuels restent dans `rounds_detail`."""
+    runs = results.get("runs", [])
+    if len({r.get("round", 1) for r in runs}) <= 1:
+        return results
+    out = {k: v for k, v in results.items() if k != "runs"}
+    out["rounds_detail"], out["runs"] = runs, []
+    for tk, variant in dict.fromkeys((r["toolkit"], r["variant"]) for r in runs):
+        grp = [r for r in runs if r["toolkit"] == tk and r["variant"] == variant]
+        metrics = {k: _merge_metric([r.get("metrics", {}).get(k) for r in grp]) for k in {k for r in grp for k in r.get("metrics", {})}}
+        phases = list(dict.fromkeys(ph for r in grp for ph in (r.get("resources") or {})))
+        res = {ph: {"cpu": _merge_metric([((r.get("resources") or {}).get(ph) or {}).get("cpu") for r in grp]),
+                    "ram_mo_max": max([((r.get("resources") or {}).get(ph) or {}).get("ram_mo_max", 0) for r in grp]),
+                    "gpu_pct": _merge_metric([((r.get("resources") or {}).get(ph) or {}).get("gpu_pct") for r in grp])}
+               for ph in phases if any((r.get("resources") or {}).get(ph) for r in grp)}
+        out["runs"].append({"toolkit": tk, "variant": variant, "metrics": metrics, "resources": res,
+                            "errors": [f"tour {r.get('round', '?')}: {e}" for r in grp for e in r.get("errors", [])],
+                            "rounds_ok": sum(1 for r in grp if r.get("metrics"))})
+    return out
 
 
 def _fmt_res(r: dict | None) -> str:

@@ -1,3 +1,20 @@
+# Essai Qt / web local
+
+## Le plus simple : KolnoaBenchmark.exe
+
+1. Double-clique sur `KolnoaBenchmark.exe` (au premier lancement Windows peut afficher « Windows a protégé votre ordinateur » :
+   clique sur *Informations complémentaires* puis *Exécuter quand même* ; le programme n'est pas signé).
+2. **Choisir 3 vidéos** (tes 3 caméras), puis **Lancer le test**.
+3. Ne touche à rien : des fenêtres s'ouvrent et se ferment seules (3 tours × Qt/web × copies légères/vidéos originales).
+4. À la fin, le dossier s'ouvre : envoie `REPORT.md` (dossier `Documents\Kolnoa_Benchmark\<date>`).
+
+Rien n'est installé, rien n'est envoyé sur Internet, les vidéos ne sont jamais modifiées. Edge ou Chrome doit être présent (il l'est sur Windows).
+La première fois, la création des copies légères prend quelques minutes (elles sont réutilisées dans le même dossier).
+
+---
+
+## Version ligne de commande (avancé)
+
 # Essai Qt (PySide6) ou web local : protocole reproductible
 
 Objectif : **mesurer, sur le PC Windows du réalisateur**, avec les **mêmes médias** et la **même timeline**, ce que valent PySide6/Qt et une interface web locale pour Kolnoa Editor. La décision n'est prise qu'après lecture des résultats ; la préférence initiale est Qt/PySide6 (décision ChatGPT, PR #14), à confirmer ou infirmer par les chiffres. **Aucun chiffre n'est estimé** : ce qui n'a pas été mesuré s'affiche « non mesuré ».
