@@ -4,7 +4,7 @@
 
 1. Double-clique sur `KolnoaBenchmark.exe` (au premier lancement Windows peut afficher « Windows a protégé votre ordinateur » :
    clique sur *Informations complémentaires* puis *Exécuter quand même* ; le programme n'est pas signé).
-2. **Choisir 3 vidéos** (tes 3 caméras), puis **Lancer le test**.
+2. **Ajouter une vidéo** (tes 3 caméras), puis **Lancer le test**.
 3. Ne touche à rien : des fenêtres s'ouvrent et se ferment seules (3 tours × Qt/web × copies légères/vidéos originales).
 4. À la fin, le dossier s'ouvre : envoie `REPORT.md` (dossier `Documents\Kolnoa_Benchmark\<date>`).
 

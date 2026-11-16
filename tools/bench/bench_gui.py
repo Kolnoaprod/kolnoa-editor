@@ -1,6 +1,6 @@
 """Kolnoa — Test de performance : petite fenêtre Windows, zéro commande.
 
-Double-clic → choisir 3 vidéos → « Lancer le test ». Le programme fait 3 tours complets (Qt et web, copies légères puis vidéos
+Double-clic → ajouter des vidéos (1 à 9) → « Lancer le test ». Le programme fait 3 tours complets (Qt et web, copies légères puis vidéos
 originales), affiche la progression et écrit REPORT.md. Il ne modifie JAMAIS les vidéos choisies.
 """
 
@@ -99,14 +99,16 @@ def main() -> None:
     frm.pack(fill="both", expand=True)
     ttk.Label(frm, text="Test de performance de l'éditeur", font=("Segoe UI", 15, "bold")).pack(anchor="w")
     ttk.Label(frm, justify="left", wraplength=600,
-              text="1. Choisis 3 vidéos (les 3 caméras).  2. Clique sur « Lancer le test ».  3. Attends la fin sans toucher à rien : "
+              text="1. Ajoute tes vidéos une par une (de 1 à 9, chacune peut venir d'un dossier différent).  2. Clique sur « Lancer le test ».  3. Attends la fin sans toucher à rien : "
                    "des fenêtres vont s'ouvrir et se fermer toutes seules. Tes vidéos ne sont jamais modifiées.").pack(anchor="w", pady=(4, 10))
-    lst = tk.Listbox(frm, height=3, activestyle="none")
+    lst = tk.Listbox(frm, height=4, activestyle="none", selectmode="extended")
     lst.pack(fill="x")
     row = ttk.Frame(frm)
     row.pack(fill="x", pady=8)
-    b_pick = ttk.Button(row, text="Choisir 3 vidéos…")
+    b_pick = ttk.Button(row, text="Ajouter une vidéo…")
     b_pick.pack(side="left")
+    b_del = ttk.Button(row, text="Retirer")
+    b_del.pack(side="left", padx=(6, 0))
     b_run = ttk.Button(row, text="Lancer le test", state="disabled")
     b_run.pack(side="left", padx=8)
     b_cancel = ttk.Button(row, text="Annuler", state="disabled")
@@ -131,21 +133,25 @@ def main() -> None:
         log.configure(state="disabled")
 
     def refresh() -> None:
-        b_run.configure(state="normal" if len(files) == 3 and not state["running"] else "disabled")
-        b_pick.configure(state="disabled" if state["running"] else "normal")
+        b_run.configure(state="normal" if 1 <= len(files) <= 9 and not state["running"] else "disabled")
+        b_pick.configure(state="disabled" if state["running"] or len(files) >= 9 else "normal")
+        b_del.configure(state="disabled" if state["running"] else "normal")
         b_cancel.configure(state="normal" if state["running"] else "disabled")
 
     def pick() -> None:
-        sel = filedialog.askopenfilenames(title="Choisis exactement 3 vidéos", filetypes=VIDEO_TYPES)
-        if not sel:
-            return
-        if len(sel) != 3:
-            messagebox.showwarning("Kolnoa", f"Il faut choisir exactement 3 vidéos (tu en as choisi {len(sel)}).")
-            return
-        files[:] = list(sel)
+        sel = filedialog.askopenfilenames(title="Ajoute une ou plusieurs vidéos", filetypes=VIDEO_TYPES)
+        for f in sel:
+            if f not in files and len(files) < 9:
+                files.append(f)
         lst.delete(0, "end")
         for f in files:
-            lst.insert("end", Path(f).name)
+            lst.insert("end", f"{Path(f).name}   ({Path(f).parent.name})")
+        refresh()
+
+    def remove() -> None:
+        for i in reversed(lst.curselection()):
+            del files[i]
+            lst.delete(i)
         refresh()
 
     def start() -> None:
@@ -194,6 +200,7 @@ def main() -> None:
         root.after(200, poll)
 
     b_pick.configure(command=pick)
+    b_del.configure(command=remove)
     b_run.configure(command=start)
     b_cancel.configure(command=stop)
     b_rep.configure(command=lambda: state["report"] and open_path(state["report"]))
