@@ -407,7 +407,34 @@ def cmd_sync_calibrate(args) -> int:
                        with_hint=args.with_hint, visual=not args.no_visual, max_pairs=args.max_pairs,
                        clock_tol_s=args.clock_tol, max_video_seconds=args.max_video_seconds, inventory_limit=args.limit,
                        only=args.only, truth=Path(args.truth) if args.truth else None, cfg=cfg, tz=args.tz)
-    res = cal.run(opts)
+    from .tasks import TaskEvent, TaskRunner, TaskState
+
+    runner = TaskRunner()
+
+    def show(ev: TaskEvent) -> None:               # même flux d'événements que celui d'une interface graphique
+        if ev.kind == "progress" and ev.progress and ev.progress.total:
+            p = ev.progress
+            eta = f", reste ~{p.eta_s:.0f} s" if p.eta_s else ""
+            print(f"  [{p.stage}] {p.current}/{p.total}{eta} {p.message}", file=sys.stderr)
+
+    runner.add_listener(show)
+    task = runner.submit("sync-calibrate", lambda ctx: cal.run(
+        opts, log=ctx.log if args.quiet else print,
+        progress=ctx.report, cancel=ctx.cancel))
+    try:
+        while not task.wait(0.2):
+            pass
+    except KeyboardInterrupt:
+        print("\nAnnulation demandée : arrêt du traitement en cours…", file=sys.stderr)
+        task.cancel()
+        task.wait()
+    runner.shutdown()
+    if task.state is TaskState.CANCELLED:
+        print("Annulé : aucun rapport écrit ; les rushes n'ont pas été touchés (lecture seule).")
+        return 130
+    if task.state is TaskState.FAILED:
+        raise task.exception or ValueError(task.error)
+    res = task.result
     print(f"\nRapport : {res['out'] / 'report.md'}")
     print("Originaux inchangés : " + ("oui" if res["unchanged"] else "NON : " + ", ".join(res["changed"])))
     return 0 if res["unchanged"] else 3
@@ -521,6 +548,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--video-dir", action="append", default=[], help="dossier vidéo relatif (le premier = caméra de référence)")
     s.add_argument("--root-map", action="append", default=[], metavar="CHEMIN_WINDOWS=CHEMIN_LOCAL",
                    help="correspondance quand le dossier est monté ailleurs (non Windows)")
+    s.add_argument("--quiet", action="store_true", help="n'affiche que la progression et le résultat")
     s.add_argument("--dry-run", action="store_true", help="inventaire + plan seulement : aucun média n'est décodé")
     s.add_argument("--inventory-only", action="store_true", help="inventaire (avec test de silence audio) sans synchro")
     s.add_argument("--no-visual", action="store_true")

@@ -83,3 +83,7 @@ fichiers (voir « Non mesuré ») doivent être analysés par la commande ci-des
 | `empty_audio_peak` | — | 1e-5 | pistes Sony à −91 dB |
 | `visual_event_min_gap_s` | — | 1 s | un flash = un événement (revue PR #9) |
 | `min_psr`, `ok_confidence`, `uncertain_confidence`, `visual_*` | inchangés | inchangés | **pas assez de données réelles** pour les déplacer honnêtement |
+
+
+## Progression et annulation
+La commande affiche l'avancement (`[inventaire]`, `[audio]`, `[visuel]`, `[rapport]`) et s'arrête proprement avec Ctrl+C : processus ffmpeg arrêté, aucun rapport partiel, rushes intacts, code de sortie 130. Voir [TASKS.md](TASKS.md).

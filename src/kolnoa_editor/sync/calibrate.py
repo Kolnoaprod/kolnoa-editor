@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 import numpy as np
 from zoneinfo import ZoneInfo
 
-from ..ffmpeg import ffmpeg_bin
+from ..ffmpeg import CancelToken, Cancelled, ffmpeg_bin
 from .audio import estimate_audio_sync
 from .config import SyncConfig
 from .sources import FileSource
@@ -211,8 +211,9 @@ def walk_media(folder: Path) -> list[Path]:
 
 
 def inventory(root: Path, folders: list[str], check_audio: bool = False, limit: int | None = None,
-              log=print, tz: str = LOCAL_TZ) -> list[MediaRecord]:
+              log=print, tz: str = LOCAL_TZ, progress=None, cancel: CancelToken | None = None) -> list[MediaRecord]:
     recs: list[MediaRecord] = []
+    found: list[tuple[str, list[Path]]] = []
     for f in folders:
         d = root / f
         if not d.is_dir():
@@ -222,8 +223,17 @@ def inventory(root: Path, folders: list[str], check_audio: bool = False, limit: 
         if limit:
             files = files[:limit]
         log(f"  {f} : {len(files)} fichier(s)")
+        found.append((f, files))
+    total = sum(len(fs) for _, fs in found)
+    for _, files in found:
         for p in files:
+            if cancel is not None:
+                cancel.raise_if_cancelled()
+            if progress:
+                progress("inventaire", len(recs), total, p.name)
             recs.append(media_record(root, p, check_audio, tz))
+    if progress:
+        progress("inventaire", total, total, "")
     return recs
 
 
@@ -315,20 +325,27 @@ def _hint(p: Pair, tol: float) -> tuple[float, float] | None:
     return None if p.expected_offset_s is None else (p.expected_offset_s, tol)
 
 
-def run_audio(root: Path, pairs: list[Pair], cfg: SyncConfig, with_hint: bool, hint_tol_s: float, log=print) -> list[AudioResult]:
+def run_audio(root: Path, pairs: list[Pair], cfg: SyncConfig, with_hint: bool, hint_tol_s: float, log=print,
+              progress=None, cancel: CancelToken | None = None) -> list[AudioResult]:
     res: list[AudioResult] = []
     cache: dict[str, FileSource] = {}
 
     def src(rel: str) -> FileSource:
         if rel not in cache:
-            cache[rel] = FileSource(root / rel, rate=cfg.rate)
+            cache[rel] = FileSource(root / rel, rate=cfg.rate, cancel=cancel)
         return cache[rel]
 
     for i, p in enumerate(pairs, 1):
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         log(f"  audio {i}/{len(pairs)} : {p.sig}  →  {p.ref}")
+        if progress:
+            progress("audio", i - 1, len(pairs), PurePosixPath(p.sig).name)
         t0 = time.perf_counter()
         try:
             est = estimate_audio_sync(src(p.ref), src(p.sig), cfg)
+        except Cancelled:
+            raise                                   # une annulation n'est jamais une « erreur de fichier »
         except Exception as exc:
             res.append(AudioResult(p.ref, p.sig, "erreur", 0.0, 0.0, 0.0, False, time.perf_counter() - t0, 0, 0, 0, None,
                                    None, None, [f"{type(exc).__name__}: {exc}"], []))
@@ -348,6 +365,8 @@ def run_audio(root: Path, pairs: list[Pair], cfg: SyncConfig, with_hint: bool, h
             row.with_hint = {"status": e2.status, "confidence": e2.confidence, "offset_s": e2.offset,
                              "drift_ppm": e2.drift_ppm}
         res.append(row)
+    if progress:
+        progress("audio", len(pairs), len(pairs), "")
     return res
 
 
@@ -359,8 +378,8 @@ def luma_delta_stats(s: LumaSeries) -> dict:
 
 
 class VisualCache:
-    def __init__(self, root: Path, cache_dir: Path, cfg: SyncConfig, max_seconds: float):
-        self.root, self.dir, self.cfg, self.max_seconds = root, cache_dir, cfg, max_seconds
+    def __init__(self, root: Path, cache_dir: Path, cfg: SyncConfig, max_seconds: float, cancel: CancelToken | None = None):
+        self.root, self.dir, self.cfg, self.max_seconds, self.cancel = root, cache_dir, cfg, max_seconds, cancel
         self.dir.mkdir(parents=True, exist_ok=True)
 
     def get(self, rel: str) -> LumaSeries:
@@ -370,22 +389,28 @@ class VisualCache:
         f = self.dir / f"{key}.npy"
         if f.exists():
             return LumaSeries(np.load(f), self.cfg.visual_fps)
-        s = luma_series(p, self.cfg, tmp_dir=self.dir, max_seconds=self.max_seconds)
+        s = luma_series(p, self.cfg, cancel=self.cancel, tmp_dir=self.dir, max_seconds=self.max_seconds)
         np.save(f, s.luma)
         return s
 
 
 def run_visual(root: Path, pairs: list[Pair], cfg: SyncConfig, cache: VisualCache, hint_tol_s: float,
-               use_hint: bool, log=print) -> list[VisualRow]:
+               use_hint: bool, log=print, progress=None, cancel: CancelToken | None = None) -> list[VisualRow]:
     rows: list[VisualRow] = []
     for i, p in enumerate(pairs, 1):
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         log(f"  visuel {i}/{len(pairs)} : {p.sig}  →  {p.ref}")
+        if progress:
+            progress("visuel", i - 1, len(pairs), PurePosixPath(p.sig).name)
         t0 = time.perf_counter()
         try:
             ref, sig = cache.get(p.ref), cache.get(p.sig)
             stats = {k: luma_delta_stats(v) for k, v in (("ref", ref), ("sig", sig))}
             h = _hint(p, hint_tol_s) if use_hint else None
             r = propose_visual_sync(ref, sig, cfg, hint=h)
+        except Cancelled:
+            raise
         except Exception as exc:
             rows.append(VisualRow(p.ref, p.sig, "erreur", 0, 0, None, None, None, None, [], time.perf_counter() - t0,
                                   [f"{type(exc).__name__}: {exc}"]))
@@ -401,6 +426,8 @@ def run_visual(root: Path, pairs: list[Pair], cfg: SyncConfig, cache: VisualCach
         if best is not None and p.expected_offset_s is not None:
             row.hint_gap_s = best.offset - p.expected_offset_s
         rows.append(row)
+    if progress:
+        progress("visuel", len(pairs), len(pairs), "")
     return rows
 
 
@@ -666,7 +693,8 @@ LIMITES = [
 ]
 
 
-def run(opts: Options, log=print) -> dict:
+def run(opts: Options, log=print, progress=None, cancel: CancelToken | None = None) -> dict:
+    """`progress(étape, courant, total, message)` et `cancel` permettent de la piloter depuis une interface ou le TaskRunner."""
     root, out = opts.root, opts.out
     if not root.is_dir():
         raise FileNotFoundError(f"dossier introuvable : {root}")
@@ -677,7 +705,7 @@ def run(opts: Options, log=print) -> dict:
     if not audio_dirs and not video_dirs:
         raise ValueError("aucun dossier à analyser : choisir --scenario ou donner --audio-dir / --video-dir")
     log("Inventaire (ffprobe, lecture seule)…")
-    inv = inventory(root, audio_dirs + video_dirs, check_audio=opts.check_audio and not opts.dry_run, limit=opts.inventory_limit, log=log, tz=opts.tz)
+    inv = inventory(root, audio_dirs + video_dirs, check_audio=opts.check_audio and not opts.dry_run, limit=opts.inventory_limit, log=log, tz=opts.tz, progress=progress, cancel=cancel)
     if opts.only:
         inv = [r for r in inv if any(s in r.rel for s in opts.only)]
     audios = [r for r in inv if r.kind == "audio" or any(r.rel.startswith(d + "/") for d in audio_dirs)]
@@ -711,11 +739,15 @@ def run(opts: Options, log=print) -> dict:
     if not (opts.dry_run or opts.inventory_only):
         if pa:
             log("Synchro audio…")
-            audio_res = run_audio(root, pa, opts.cfg, opts.with_hint, opts.clock_tol_s, log)
+            audio_res = run_audio(root, pa, opts.cfg, opts.with_hint, opts.clock_tol_s, log, progress, cancel)
         if pv:
             log("Synchro visuelle…")
-            visual_res = run_visual(root, pv, opts.cfg, VisualCache(root, out / "cache", opts.cfg, opts.max_video_seconds),
-                                    opts.clock_tol_s, opts.visual_use_hint, log)
+            visual_res = run_visual(root, pv, opts.cfg, VisualCache(root, out / "cache", opts.cfg, opts.max_video_seconds, cancel),
+                                    opts.clock_tol_s, opts.visual_use_hint, log, progress, cancel)
+    if cancel is not None:
+        cancel.raise_if_cancelled()          # annulée : aucun rapport partiel écrit
+    if progress:
+        progress("rapport", 0, 1, "")
     truth_rows: list[dict] = []
     if opts.truth and opts.truth.exists():
         truth_rows = apply_truth(json.loads(opts.truth.read_text(encoding="utf-8")), audio_res, visual_res)
@@ -727,5 +759,7 @@ def run(opts: Options, log=print) -> dict:
     sug = findings.get("min_psr_suggere")
     if isinstance(sug, dict):
         (out / "suggested_sync_config.json").write_text(json.dumps({"min_psr": sug["valeur"]}, indent=2), encoding="utf-8")
+    if progress:
+        progress("rapport", 1, 1, "")
     return {"inventory": len(inv), "pairs_audio": len(pa), "pairs_visual": len(pv), "audio": audio_res, "visual": visual_res,
             "unchanged": not changed, "changed": changed, "out": out}
