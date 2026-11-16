@@ -12,7 +12,7 @@ import copy
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, ClassVar
 
-from .model import (AUDIO_MODES, Angle, Clip, LockedError, Marker, MulticamGroup, Timeline, TimelineError, Track)
+from .model import (AUDIO_MODES, Angle, Clip, LockedError, Marker, MulticamGroup, Subclip, Timeline, TimelineError, Track)
 
 _REGISTRY: dict[str, type] = {}
 MIN_PIECE = 1  # image : plus petit morceau acceptable lors d'une scission
@@ -555,6 +555,69 @@ class SetClipAngle(Op):
 
     def describe(self):
         return f"~ {self.clip_id} : angle {self.angle}"
+
+
+# --- chutier --------------------------------------------------------------------
+def _sub_from(d: dict) -> Subclip:
+    try:
+        return Subclip(**d)
+    except TypeError as exc:
+        raise TimelineError(f"Plan de chutier mal formé : {exc}") from exc
+
+
+@register
+@dataclass
+class AddSubclip(Op):
+    type: ClassVar[str] = "add_subclip"
+    sub: dict
+
+    def apply(self, tl):
+        b = _sub_from(self.sub)
+        if any(x.id == b.id for x in tl.bin):
+            raise TimelineError(f"plan de chutier déjà existant : {b.id}")
+        tl.bin.append(b)
+        return RemoveSubclip(b.id)
+
+    def describe(self):
+        return f"+ chutier {self.sub.get('id')} ({self.sub.get('media')})"
+
+
+@register
+@dataclass
+class RemoveSubclip(Op):
+    type: ClassVar[str] = "remove_subclip"
+    sub_id: str
+
+    def apply(self, tl):
+        b = tl.subclip(self.sub_id)
+        tl.bin.remove(b)
+        return AddSubclip(asdict(b))
+
+    def describe(self):
+        return f"- chutier {self.sub_id}"
+
+
+@register
+@dataclass
+class SetSubclip(Op):
+    """Modifie le nom, les repères I/O, les étiquettes ou la note d'un plan du chutier."""
+    type: ClassVar[str] = "set_subclip"
+    sub_id: str
+    props: dict
+
+    def apply(self, tl):
+        b = tl.subclip(self.sub_id)
+        allowed = {"name", "src_in", "src_out", "tags", "note"}
+        bad = set(self.props) - allowed
+        if bad:
+            raise TimelineError(f"propriétés de chutier inconnues : {', '.join(sorted(bad))}")
+        old = {k: copy.deepcopy(getattr(b, k)) for k in self.props}
+        for k, v in self.props.items():
+            setattr(b, k, copy.deepcopy(v))
+        return SetSubclip(b.id, old)
+
+    def describe(self):
+        return f"~ chutier {self.sub_id} : {', '.join(self.props)}"
 
 
 # --- transaction ----------------------------------------------------------
