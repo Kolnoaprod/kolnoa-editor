@@ -163,3 +163,70 @@ def test_threshold_findings_need_enough_windows_and_never_apply_anything():
     r.window_table = good + bad
     f = cal.threshold_findings([r])
     assert isinstance(f["min_psr_suggere"], dict) and 8 <= f["min_psr_suggere"]["valeur"] <= 15
+
+
+# --- progression et annulation (C1a) ---------------------------------------------------------------------
+def _opts(root, out, **kw):
+    return cal.Options(root=root, out=out, scenario="custom", audio_dirs=["RUSHES/AUDIO/MIC 1", "RUSHES/AUDIO/MIC 2"],
+                       video_dirs=["RUSHES/CAM 1", "RUSHES/DRONE"], max_video_seconds=30.0, **kw)
+
+
+def test_progress_reports_every_stage_in_order_and_reaches_the_total(wedding, tmp_path):
+    seen = []
+    res = cal.run(_opts(wedding, tmp_path / "r"), log=lambda *_: None, progress=lambda *a: seen.append(a))
+    stages = []
+    for st, *_ in seen:
+        if not stages or stages[-1] != st:
+            stages.append(st)
+    assert stages == ["inventaire", "audio", "visuel", "rapport"]
+    for st in stages:
+        cur = [c for s, c, t, _ in seen if s == st]
+        assert cur == sorted(cur)
+        tot = {t for s, c, t, _ in seen if s == st}
+        assert len(tot) == 1 and cur[-1] == tot.pop()              # chaque étape finit à 100 %
+    assert res["unchanged"]
+
+
+def test_cancel_during_the_audio_stage_writes_no_report_and_touches_nothing(wedding, tmp_path):
+    from kolnoa_editor.ffmpeg import CancelToken, Cancelled
+
+    token, before, out = CancelToken(), listing(wedding), tmp_path / "r"
+
+    def progress(stage, cur, total, msg):
+        if stage == "audio" and cur == 0:
+            token.cancel()
+
+    with pytest.raises(Cancelled):
+        cal.run(_opts(wedding, out), log=lambda *_: None, progress=progress, cancel=token)
+    assert not (out / "report.md").exists()                        # pas de rapport partiel présenté comme complet
+    assert listing(wedding) == before                              # rushes intacts (lecture seule)
+
+
+def test_cancel_is_not_swallowed_as_a_file_error(wedding, tmp_path):
+    from kolnoa_editor.ffmpeg import CancelToken, Cancelled
+
+    token = CancelToken()
+    token.cancel()
+    with pytest.raises(Cancelled):
+        cal.run(_opts(wedding, tmp_path / "r"), log=lambda *_: None, cancel=token)
+
+
+def test_cli_prints_progress_and_exits_130_when_cancelled(wedding, tmp_path, capsys, monkeypatch):
+    out = tmp_path / "r"
+    code = main(["sync-calibrate", str(wedding), "--scenario", "custom", "--audio-dir", "RUSHES/AUDIO/MIC 1",
+                 "--audio-dir", "RUSHES/AUDIO/MIC 2", "--video-dir", "RUSHES/CAM 1", "--no-visual", "--out", str(out), "--quiet"])
+    cap = capsys.readouterr()
+    assert code == 0 and "[inventaire]" in cap.err and "[audio]" in cap.err and "Originaux inchangés : oui" in cap.out
+    from kolnoa_editor.tasks import Task
+
+    def interrupt(self, timeout=None):                             # Ctrl+C pendant l'attente de la tâche
+        if not getattr(self, "_boom", False):
+            self._boom = True
+            raise KeyboardInterrupt
+        return self._done.wait(timeout)
+    monkeypatch.setattr(Task, "wait", interrupt)
+    out2 = tmp_path / "r2"
+    code = main(["sync-calibrate", str(wedding), "--scenario", "custom", "--audio-dir", "RUSHES/AUDIO/MIC 1",
+                 "--audio-dir", "RUSHES/AUDIO/MIC 2", "--video-dir", "RUSHES/CAM 1", "--no-visual", "--out", str(out2), "--quiet"])
+    cap = capsys.readouterr()
+    assert code == 130 and "Annulé" in cap.out
