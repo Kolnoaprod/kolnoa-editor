@@ -70,6 +70,17 @@ def to_decision_list(tl: Timeline) -> tuple[DecisionList, list[str]]:
         end = round(c.src_in + frames_to_seconds(c.duration, tl.fps), 6)
         segments.append(Segment(id=c.id, clip=c.media, start=c.src_in, end=end, audio=c.audio,
                                 fade_in=c.fade_in, fade_out=c.fade_out, note=c.note, parent=c.parent))
+    for c in ordered:
+        if c.strips is not None:
+            warnings.append(f"{c.id}: canaux explicites (mono / dual mono / stéréo) non exportés : le rendu audio complet passe par render_mix")
+        if c.fade_in_curve != "linear" or c.fade_out_curve != "linear":
+            warnings.append(f"{c.id}: courbe de fondu non exportée")
+    if tl.crossfades:
+        warnings.append(f"{len(tl.crossfades)} fondu(s) enchaîné(s) non exporté(s) (utiliser render_mix)")
+    if tl.masters:
+        warnings.append(f"{len(tl.masters)} plage(s) de source audio non exportée(s) (utiliser render_mix)")
+    if any(t.solo for t in tl.tracks):
+        warnings.append("solo de piste non exporté")
     if tl.markers:
         warnings.append(f"{len(tl.markers)} repère(s) non exporté(s) (sans effet sur le rendu)")
     dl = DecisionList(title=tl.title, version=tl.version, fps=tl.fps, resolution=tuple(tl.resolution),

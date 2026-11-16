@@ -17,6 +17,7 @@ SCHEMA = 1
 TRACK_KINDS = {"video", "audio"}
 AUDIO_MODES = {"source", "mute", "group"}   # group = audio maître du groupe multicam
 MARKER_KINDS = {"note", "beat", "phrase", "sync", "chapter", "keep"}  # keep = zone à ne pas couper
+FADE_CURVES = {"linear", "equal_power", "log"}      # equal_power : somme de puissance constante (crossfade de sources différentes)
 SYNC_STATUSES = {"unsynced", "reference", "ok", "incertain", "discontinu", "impossible", "manual"}
 SYNC_METHODS = {"none", "reference", "audio", "visual", "metadata", "manual"}
 USABLE_STATUSES = {"reference", "ok", "manual"}     # seuls états utilisables sans validation humaine supplémentaire
@@ -25,6 +26,8 @@ _CLIP_ID = re.compile(r"^s(\d+)$")
 _MARKER_ID = re.compile(r"^m(\d+)$")
 _LINK_ID = re.compile(r"^l(\d+)$")
 _SUB_ID = re.compile(r"^b(\d+)$")
+_MASTER_ID = re.compile(r"^r(\d+)$")
+_XFADE_ID = re.compile(r"^x(\d+)$")
 
 
 class TimelineError(ValueError):
@@ -43,6 +46,20 @@ class Track:
     locked: bool = False
     muted: bool = False
     gain_db: float = 0.0
+    solo: bool = False           # si une piste est en solo, seules les pistes en solo s'entendent
+
+
+@dataclass
+class AudioStrip:
+    """Un canal de sortie indépendant d'un plan : prend le canal `src` de la source, avec son gain, son panoramique
+    (−1 gauche … +1 droite, loi de pan −3 dB), son muet et son solo. Deux bandes = « dual mono » (deux canaux qui vivent
+    leur vie), à ne pas confondre avec dupliquer un mono (même chose au départ, mais ici chaque canal se règle seul)."""
+    src: int = 0
+    gain_db: float = 0.0
+    pan: float = 0.0
+    mute: bool = False
+    solo: bool = False
+    name: str = ""
 
 
 @dataclass
@@ -64,7 +81,14 @@ class Clip:
     group: str | None = None     # groupe multicam : le plan montre un angle du groupe, son audio vient du maître
     angle: str | None = None
     link: str | None = None      # plans liés (image + son) : coupés, déplacés et supprimés ensemble tant qu'ils partagent ce id
+    strips: list[AudioStrip] | None = None   # None = routage d'origine de la source ; sinon canaux de sortie indépendants
+    fade_in_curve: str = "linear"
+    fade_out_curve: str = "linear"
     extra: dict[str, Any] = field(default_factory=dict)  # réservé (transitions, effets, étalonnage)
+
+    def __post_init__(self):
+        if self.strips is not None:
+            self.strips = [AudioStrip(**b) if isinstance(b, dict) else b for b in self.strips]
 
     @property
     def end(self) -> int:
@@ -141,6 +165,39 @@ class MulticamGroup:
 
 
 @dataclass
+class MasterRange:
+    """Source audio de référence d'une séquence : de `start` à `end` (secondes de l'AXE DU GROUPE, donc stable quand on
+    déplace, coupe ou change d'angle), les plans multicam « audio=group » du groupe prennent le son de `source`.
+    Hors de toute plage : le maître du groupe. C'est un choix éditorial ; il n'a rien à voir avec la synchro ni avec la
+    qualité mesurée, qui ne font que le conseiller."""
+    id: str
+    group: str
+    start: float
+    end: float
+    source: str                  # id d'un angle du groupe qui a de l'audio
+    reason: str = ""             # pourquoi (ex. « proposition validée : bruit de fond plus bas »)
+
+
+@dataclass
+class Crossfade:
+    """Fondu enchaîné entre deux plans voisins d'une même piste : centré sur la coupure, `duration` secondes en tout.
+    Demande `duration / 2` de matière source de chaque côté de la coupure."""
+    id: str
+    left: str
+    right: str
+    duration: float
+    curve: str = "equal_power"
+
+
+@dataclass
+class AudioSettings:
+    sample_rate: int = 48000                 # fréquence du mixage ; les sources en 44,1 kHz sont rééchantillonnées
+    ceiling_dbtp: float = -1.0               # plafond de crête (limiteur final) ; marge pour l'encodage avec perte
+    target_lufs: float | None = None         # None = pas de normalisation ; sinon gain constant calculé sur le mixage
+    switch_fade_ms: float = 10.0             # fondu aux changements de source maître au milieu d'un plan
+
+
+@dataclass
 class Timeline:
     title: str
     version: int = 1
@@ -152,6 +209,9 @@ class Timeline:
     clips: list[Clip] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
     groups: list[MulticamGroup] = field(default_factory=list)
+    masters: list[MasterRange] = field(default_factory=list)
+    crossfades: list[Crossfade] = field(default_factory=list)
+    audio_settings: AudioSettings = field(default_factory=AudioSettings)
     bin: list[Subclip] = field(default_factory=list)       # chutier : plans courts repérés I/O
     retired: list[str] = field(default_factory=list)
     schema: int = SCHEMA
@@ -174,6 +234,26 @@ class Timeline:
             if m.id == marker_id:
                 return m
         raise TimelineError(f"Repère inconnu : {marker_id}")
+
+    def master(self, master_id: str) -> MasterRange:
+        for r in self.masters:
+            if r.id == master_id:
+                return r
+        raise TimelineError(f"Plage de source audio inconnue : {master_id}")
+
+    def next_master_id(self) -> str:
+        nums = [int(m.group(1)) for r in self.masters if (m := _MASTER_ID.match(r.id))]
+        return f"r{(max(nums) + 1 if nums else 1):03d}"
+
+    def crossfade(self, xf_id: str) -> Crossfade:
+        for x in self.crossfades:
+            if x.id == xf_id:
+                return x
+        raise TimelineError(f"Fondu enchaîné inconnu : {xf_id}")
+
+    def next_crossfade_id(self) -> str:
+        nums = [int(m.group(1)) for x in self.crossfades if (m := _XFADE_ID.match(x.id))]
+        return f"x{(max(nums) + 1 if nums else 1):03d}"
 
     def subclip(self, sub_id: str) -> Subclip:
         for b in self.bin:
@@ -284,6 +364,7 @@ class Timeline:
                 prev = c
         self._validate_groups()
         self._validate_bin()
+        self._validate_audio()
         mseen: set[str] = set()
         for m in self.markers:
             if m.id in mseen:
@@ -291,6 +372,59 @@ class Timeline:
             mseen.add(m.id)
             if m.frame < 0 or m.kind not in MARKER_KINDS:
                 raise TimelineError(f"{m.id}: repère invalide")
+
+    def _validate_audio(self) -> None:
+        for c in self.clips:
+            if c.fade_in_curve not in FADE_CURVES or c.fade_out_curve not in FADE_CURVES:
+                raise TimelineError(f"{c.id}: courbe de fondu inconnue")
+            if c.strips is not None:
+                if not 1 <= len(c.strips) <= 8:
+                    raise TimelineError(f"{c.id}: 1 à 8 canaux de sortie attendus, pas {len(c.strips)}")
+                for b in c.strips:
+                    if not isinstance(b.src, int) or b.src < 0 or not -1.0 <= b.pan <= 1.0 or not -96.0 <= b.gain_db <= 24.0:
+                        raise TimelineError(f"{c.id}: canal invalide (src {b.src}, pan {b.pan}, gain {b.gain_db} dB)")
+        if not -96.0 <= self.audio_settings.ceiling_dbtp <= 0.0:
+            raise TimelineError("plafond de crête invalide (−96 à 0 dBTP)")
+        if self.audio_settings.sample_rate not in (44100, 48000, 96000):
+            raise TimelineError("fréquence d'échantillonnage du mixage : 44100, 48000 ou 96000")
+        if self.audio_settings.target_lufs is not None and not -50.0 <= self.audio_settings.target_lufs <= 0.0:
+            raise TimelineError("cible de sonie invalide (−50 à 0 LUFS)")
+        if not 0.0 <= self.audio_settings.switch_fade_ms <= 500.0:
+            raise TimelineError("fondu de changement de source invalide (0 à 500 ms)")
+        seen: set[str] = set()
+        by_group: dict[str, list[MasterRange]] = {}
+        for r in self.masters:
+            if r.id in seen:
+                raise TimelineError(f"id de plage audio en double : {r.id}")
+            seen.add(r.id)
+            g = self.group(r.group)
+            a = g.angle(r.source)
+            if not a.has_audio:
+                raise TimelineError(f"{r.id}: l'angle {r.source} n'a pas d'audio")
+            if not (0 <= r.start < r.end):
+                raise TimelineError(f"{r.id}: plage invalide [{r.start}, {r.end}]")
+            by_group.setdefault(r.group, []).append(r)
+        for gid, rs in by_group.items():
+            rs.sort(key=lambda x: x.start)
+            for a, b in zip(rs, rs[1:]):
+                if b.start < a.end - 1e-9:
+                    raise TimelineError(f"{gid}: les plages audio {a.id} et {b.id} se chevauchent")
+        xseen: set[str] = set()
+        for x in self.crossfades:
+            if x.id in xseen:
+                raise TimelineError(f"id de fondu enchaîné en double : {x.id}")
+            xseen.add(x.id)
+            if x.curve not in FADE_CURVES or not x.duration > 0:
+                raise TimelineError(f"{x.id}: fondu enchaîné invalide")
+            left, right = self.clip(x.left), self.clip(x.right)
+            if left.track != right.track or left.end != right.start:
+                raise TimelineError(f"{x.id}: {x.left} et {x.right} ne sont plus voisins sur la même piste "
+                                    "(supprimer le fondu enchaîné avant de déplacer, couper ou ripple)")
+            half = x.duration / 2
+            if half > left.duration / self.fps or half > right.duration / self.fps:
+                raise TimelineError(f"{x.id}: plus long que la moitié d'un des deux plans")
+            if right.src_in + 1e-9 < half:
+                raise TimelineError(f"{x.id}: {x.right} n'a pas {half:.3f} s de matière avant son entrée")
 
     def _validate_bin(self) -> None:
         seen: set[str] = set()
@@ -356,6 +490,8 @@ class Timeline:
         d["markers"] = sorted(d["markers"], key=lambda m: (m["frame"], m["id"]))
         d["groups"] = sorted(d["groups"], key=lambda g: g["id"])
         d["bin"] = sorted(d["bin"], key=lambda b: b["id"])
+        d["masters"] = sorted(d["masters"], key=lambda r: (r["group"], r["start"], r["id"]))
+        d["crossfades"] = sorted(d["crossfades"], key=lambda x: x["id"])
         d["retired"] = sorted(d["retired"])
         return d
 
@@ -374,6 +510,9 @@ class Timeline:
                 groups=[MulticamGroup(id=g["id"], master=g["master"], name=g.get("name", ""),
                                       angles=[Angle(**a) for a in g.get("angles", [])])
                         for g in d.get("groups", [])],
+                masters=[MasterRange(**r) for r in d.get("masters", [])],
+                crossfades=[Crossfade(**x) for x in d.get("crossfades", [])],
+                audio_settings=AudioSettings(**d.get("audio_settings", {})),
                 bin=[Subclip(**b) for b in d.get("bin", [])],
                 retired=list(d.get("retired", [])), schema=int(d["schema"]),
             )

@@ -12,7 +12,7 @@ import copy
 from dataclasses import dataclass, field, asdict, fields
 from typing import Any, ClassVar
 
-from .model import (AUDIO_MODES, Angle, Clip, LockedError, Marker, MulticamGroup, Subclip, Timeline, TimelineError, Track)
+from .model import (AUDIO_MODES, Angle, AudioSettings, AudioStrip, Clip, Crossfade, MasterRange, LockedError, Marker, MulticamGroup, Subclip, Timeline, TimelineError, Track)
 
 _REGISTRY: dict[str, type] = {}
 MIN_PIECE = 1  # image : plus petit morceau acceptable lors d'une scission
@@ -304,7 +304,8 @@ class ShiftAfter(Op):
         return f"~ après l'image {self.from_frame} sur {', '.join(self.tracks)} : décalage de {self.delta} i"
 
 
-_CLIP_PROPS = {"audio", "fade_in", "fade_out", "gain_db", "note", "label", "locked", "extra", "media", "link"}
+_CLIP_PROPS = {"audio", "fade_in", "fade_out", "gain_db", "note", "label", "locked", "extra", "media", "link",
+               "fade_in_curve", "fade_out_curve"}
 
 
 @register
@@ -341,7 +342,7 @@ class SetTrackProps(Op):
 
     def apply(self, tl):
         t = tl.track(self.track_id)
-        unknown = set(self.props) - {"role", "locked", "muted", "gain_db"}
+        unknown = set(self.props) - {"role", "locked", "muted", "gain_db", "solo"}
         if unknown:
             raise TimelineError(f"propriétés de piste inconnues : {sorted(unknown)}")
         old = {k: getattr(t, k) for k in self.props}
@@ -555,6 +556,122 @@ class SetClipAngle(Op):
 
     def describe(self):
         return f"~ {self.clip_id} : angle {self.angle}"
+
+
+# --- audio : canaux, plages de source maître, fondus enchaînés, réglages ---------------------
+@register
+@dataclass
+class SetClipStrips(Op):
+    """Remplace le routage de canaux d'un plan (`None` = routage d'origine de la source). Réversible exactement."""
+    type: ClassVar[str] = "set_clip_strips"
+    clip_id: str
+    strips: list | None
+
+    def apply(self, tl):
+        c = tl.clip(self.clip_id)
+        _writable(tl, c)
+        old = None if c.strips is None else [asdict(b) for b in c.strips]
+        try:
+            c.strips = None if self.strips is None else [AudioStrip(**b) if isinstance(b, dict) else b for b in self.strips]
+        except TypeError as exc:
+            raise TimelineError(f"{c.id}: canal mal formé : {exc}") from exc
+        return SetClipStrips(c.id, old)
+
+    def describe(self):
+        n = "routage d'origine" if self.strips is None else f"{len(self.strips)} canal(aux)"
+        return f"~ {self.clip_id} : {n}"
+
+
+@register
+@dataclass
+class AddMaster(Op):
+    type: ClassVar[str] = "add_master"
+    master: dict
+
+    def apply(self, tl):
+        try:
+            r = MasterRange(**self.master)
+        except TypeError as exc:
+            raise TimelineError(f"plage de source audio mal formée : {exc}") from exc
+        if any(x.id == r.id for x in tl.masters):
+            raise TimelineError(f"plage audio déjà existante : {r.id}")
+        tl.masters.append(r)
+        return RemoveMaster(r.id)
+
+    def describe(self):
+        m = self.master
+        return f"+ source audio {m.get('source')} de {m.get('start')} s à {m.get('end')} s (groupe {m.get('group')})"
+
+
+@register
+@dataclass
+class RemoveMaster(Op):
+    type: ClassVar[str] = "remove_master"
+    master_id: str
+
+    def apply(self, tl):
+        r = tl.master(self.master_id)
+        tl.masters.remove(r)
+        return AddMaster(asdict(r))
+
+    def describe(self):
+        return f"- plage de source audio {self.master_id}"
+
+
+@register
+@dataclass
+class AddCrossfade(Op):
+    type: ClassVar[str] = "add_crossfade"
+    crossfade: dict
+
+    def apply(self, tl):
+        try:
+            x = Crossfade(**self.crossfade)
+        except TypeError as exc:
+            raise TimelineError(f"fondu enchaîné mal formé : {exc}") from exc
+        if any(y.id == x.id for y in tl.crossfades):
+            raise TimelineError(f"fondu enchaîné déjà existant : {x.id}")
+        tl.crossfades.append(x)
+        return RemoveCrossfade(x.id)
+
+    def describe(self):
+        x = self.crossfade
+        return f"+ fondu enchaîné {x.get('left')} → {x.get('right')} ({x.get('duration')} s)"
+
+
+@register
+@dataclass
+class RemoveCrossfade(Op):
+    type: ClassVar[str] = "remove_crossfade"
+    crossfade_id: str
+
+    def apply(self, tl):
+        x = tl.crossfade(self.crossfade_id)
+        tl.crossfades.remove(x)
+        return AddCrossfade(asdict(x))
+
+    def describe(self):
+        return f"- fondu enchaîné {self.crossfade_id}"
+
+
+@register
+@dataclass
+class SetAudioSettings(Op):
+    type: ClassVar[str] = "set_audio_settings"
+    props: dict
+
+    def apply(self, tl):
+        allowed = {"sample_rate", "ceiling_dbtp", "target_lufs", "switch_fade_ms"}
+        bad = set(self.props) - allowed
+        if bad:
+            raise TimelineError(f"réglages audio inconnus : {sorted(bad)}")
+        old = {k: getattr(tl.audio_settings, k) for k in self.props}
+        for k, v in self.props.items():
+            setattr(tl.audio_settings, k, v)
+        return SetAudioSettings(old)
+
+    def describe(self):
+        return "~ réglages audio : " + ", ".join(f"{k}={v!r}" for k, v in self.props.items())
 
 
 # --- chutier --------------------------------------------------------------------
