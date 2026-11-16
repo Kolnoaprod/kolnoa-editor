@@ -7,6 +7,9 @@ on:
     branches: [feat/bench-gui]
     paths: ["tools/bench/**", ".github/workflows/bench-exe.yml"]
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -46,3 +49,11 @@ jobs:
           name: KolnoaBenchmark
           path: tools/bench/exe/dist/KolnoaBenchmark.exe
           retention-days: 14
+      - name: Pré-version « bench-latest » (lien de téléchargement direct, pas une release officielle)
+        if: github.ref == 'refs/heads/feat/bench-gui'
+        shell: bash
+        env: { GH_TOKEN: "${{ github.token }}" }
+        run: |
+          gh release delete bench-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create bench-latest tools/bench/exe/dist/KolnoaBenchmark.exe --prerelease --target "$GITHUB_SHA" \
+            --title "Kolnoa — Test de performance (EXE)" --notes "Double-clic sur KolnoaBenchmark.exe. Non signé : SmartScreen peut avertir. Ne rien fusionner : branche feat/bench-gui."
