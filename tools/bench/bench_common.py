@@ -9,11 +9,29 @@ from __future__ import annotations
 import json
 import math
 import random
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 PEAK_BIN_S = 0.02            # un pic d'amplitude par 20 ms
 PEAK_MAX_S = 600             # au plus 10 minutes de pics (la forme d'onde est réutilisée sur toutes les pistes)
+
+
+def run_capture(cmd: list[str], timeout: float | None = None, check: bool = True) -> bytes:
+    """Lance une commande SANS tube ni console : sortie et erreurs vont dans des fichiers temporaires, stdin fermé.
+    Robuste dans un EXE Windows « fenêtré » (pas de stdin/stdout valides) ; l'erreur du programme est reprise dans l'exception."""
+    with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe:
+        try:
+            rc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, timeout=timeout).returncode
+        except FileNotFoundError:
+            raise RuntimeError(f"programme introuvable : {cmd[0]}") from None
+        fo.seek(0)
+        fe.seek(0)
+        out, err = fo.read(), fe.read().decode("utf-8", "replace").strip()
+    if check and rc != 0:
+        raise RuntimeError(f"{Path(cmd[0]).name} a échoué (code {rc}) : {err[-600:] or 'sans message'}")
+    return out
 
 
 # --- statistiques ------------------------------------------------------------------------------------
@@ -30,9 +48,8 @@ def summarize(values: list[float] | None) -> dict | None:
 # --- sondes média -----------------------------------------------------------------------------------
 def probe(path: str | Path) -> dict:
     """ffprobe : codec, résolution, fréquence d'images, durée, audio. Ne lit pas le média en entier."""
-    out = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
-                         capture_output=True, text=True, check=True).stdout
-    d = json.loads(out)
+    out = run_capture(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)])
+    d = json.loads(out.decode("utf-8", "replace"))
     v = next((s for s in d["streams"] if s["codec_type"] == "video"), None)
     a = next((s for s in d["streams"] if s["codec_type"] == "audio"), None)
     info = {"path": str(path), "name": Path(path).name, "duration_s": float(d["format"].get("duration", 0) or 0),
@@ -54,16 +71,16 @@ def make_proxy(src: str | Path, dst: str | Path, height: int = 540) -> None:
     if src.resolve() == dst.resolve():
         raise ValueError("le proxy ne peut pas écraser la source")
     fps = probe(src).get("fps") or 25
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264",
-                    "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-g", str(max(1, round(fps))),
-                    "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(dst)], check=True)
+    run_capture(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264",
+                 "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-g", str(max(1, round(fps))),
+                 "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(dst)])
 
 
 def make_peaks(src: str | Path) -> list[int]:
     """Pics d'amplitude 0..255 par tranche de 20 ms (mono 8 kHz). Sert aux formes d'onde des deux prototypes."""
     import numpy as np
-    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(src), "-t", str(PEAK_MAX_S), "-vn", "-ac", "1", "-ar", "8000",
-                          "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    raw = run_capture(["ffmpeg", "-v", "error", "-i", str(src), "-t", str(PEAK_MAX_S), "-vn", "-ac", "1", "-ar", "8000",
+                       "-f", "f32le", "-"])
     x = np.frombuffer(raw, dtype=np.float32)
     per = int(8000 * PEAK_BIN_S)
     n = len(x) // per

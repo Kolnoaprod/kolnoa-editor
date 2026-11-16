@@ -28,6 +28,9 @@ FROZEN = bool(getattr(sys, "frozen", False))
 HERE = Path(getattr(sys, "_MEIPASS", None) or Path(__file__).resolve().parent)     # EXE : dossier d'extraction PyInstaller
 
 
+QUIET = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)   # EXE fenêtré : pas de std valides
+
+
 def use_bundled_ffmpeg() -> None:
     """Dans l'EXE, ffmpeg.exe / ffprobe.exe sont embarqués à côté des ressources : on les met en tête du PATH."""
     if (HERE / "bin").is_dir():
@@ -37,7 +40,7 @@ def use_bundled_ffmpeg() -> None:
 # --- machine ----------------------------------------------------------------------------------------
 def _run(cmd: list[str]) -> str | None:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout.strip() or None
+        return bc.run_capture(cmd, timeout=20).decode("utf-8", "replace").strip() or None
     except Exception:
         return None
 
@@ -224,7 +227,7 @@ def run_qt(out: Path, variant: str, timeout: float, no_audio: bool = False, canc
     proc = subprocess.Popen([*worker, "--scenario", str(out / "scenario.json"),
                              "--media-map", str(out / "media_map.json"), "--peaks", str(out / "peaks.json"),
                              "--variant", variant, "--out", str(res_file), "--launch-epoch", str(t_launch),
-                             *(["--no-audio"] if no_audio else [])])
+                             *(["--no-audio"] if no_audio else [])], **QUIET)
     sampler = Sampler(lambda: descendants(proc.pid))
     sampler.start()
     ok = wait_for(lambda: proc.poll() is not None or (cancel and cancel()), timeout, f"Qt {variant}")
@@ -245,7 +248,7 @@ def run_web(out: Path, variant: str, srv: Server, browser: str, timeout: float, 
     url = f"http://127.0.0.1:{srv.port}/bench_web.html?variant={variant}&launch={time.time()}"
     proc = subprocess.Popen([browser, f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
                              "--autoplay-policy=no-user-gesture-required", "--disable-extensions",
-                             "--new-window", *(extra or []), url])
+                             "--new-window", *(extra or []), url], **QUIET)
     sampler = Sampler(lambda: pids_with_arg(str(profile)))
     sampler.start()
     ok = wait_for(lambda: key in srv.results or (cancel and cancel()), timeout, f"web {variant}")

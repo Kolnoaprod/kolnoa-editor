@@ -71,3 +71,12 @@ def test_pipeline_runs_all_steps(tmp_path, monkeypatch):
     res = br.run_pipeline(["x"], tmp_path, rounds=3, progress=lambda d, t, l: seen.append((d, t)))
     assert len(res["runs"]) == 3 * 2 * 2 and seen[-1] == (12, 12)       # 3 tours × 2 variantes × (Qt, web)
     assert all(r["errors"] for r in res["runs"])                        # sans PySide6 ni navigateur : erreurs explicites, pas de crash
+
+
+def test_run_capture_survives_without_std_handles_and_reports_errors(tmp_path):
+    out = bc.run_capture([sys.executable, "-c", "import sys;sys.stdout.write('ok')"])
+    assert out == b"ok"
+    with pytest.raises(RuntimeError, match="échoué.*boom"):
+        bc.run_capture([sys.executable, "-c", "import sys;sys.stderr.write('boom');sys.exit(3)"])
+    with pytest.raises(RuntimeError, match="introuvable"):
+        bc.run_capture(["programme_inexistant_xyz"])
