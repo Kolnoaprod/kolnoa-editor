@@ -11,6 +11,7 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 - Par défaut tout se fait par prompt ; l'éditeur sert à regarder et à retoucher complètement à la main.
 - **Retouche ancrée** : l'utilisateur avance dans l'aperçu, s'arrête, écrit un prompt (« ici, passe sur CAM 2 », « raccourcis ce silence ») ; il est rattaché au plan source et au temps (`comments.py`), pas au temps du rendu.
 - **File de retouches** : plusieurs retouches peuvent être posées à la suite ; elles s'exécutent ensuite en lot (bouton « Appliquer les retouches »), chacune restant `open`, `done` ou `orphan`.
+- **Progression visible** : dès qu'un prompt ou un lot est lancé, une barre indique l'étape (lecture, analyse, calcul des opérations, vérification des verrous), la retouche en cours, une estimation du temps et un bouton Annuler ; elle repose sur le `TaskRunner` (§2).
 - **Diff avant validation** : le lot produit une liste d'opérations lisible (durée avant/après, verrous respectés) ; validation totale, partielle ou refus ; chaque validation crée une version comparable.
 - **Parité** : toute action manuelle est une opération ; toute opération de l'IA est modifiable à la main ; ce qui est posé à la main devient un verrou que l'IA ne défait pas au prompt suivant.
 - **Éditeur manuel, par étapes** : lecture et sélection, puis coupes / déplacements / changement d'angle, puis audio, vitesse, transitions, couleur.
