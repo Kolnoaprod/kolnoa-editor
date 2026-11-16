@@ -1,72 +1,131 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Kolnoa — essai de performance (web local)</title>
+<title>Kolnoa — essai web local</title>
 <style>
- body{font:14px system-ui;background:#16181d;color:#e6e6e6;margin:20px;max-width:900px}
- button,input{font:inherit;margin:4px 0}
- pre{background:#0d0f13;padding:12px;border-radius:6px;white-space:pre-wrap}
- canvas{background:#0d0f13;width:100%;height:160px;display:block;margin:8px 0}
+ html,body{margin:0;background:#16181d;color:#e6e6e6;font:13px system-ui}
+ #stage{position:relative;width:640px;height:360px;background:#000}
+ video{position:absolute;left:0;top:0;width:2px;height:2px;opacity:.01;object-fit:contain}
+ video.shown{width:640px;height:360px;opacity:1}
+ canvas{display:block;background:#0d0f13}
+ #msg{padding:6px}
 </style>
-<h2>Essai de performance : interface web locale</h2>
-<p>Ne modifie rien, n'envoie rien. Choisis 3 fichiers vidéo (de préférence des proxys ou rushes courts, un par caméra). Tout reste dans le navigateur.</p>
-<input id="f" type="file" accept="video/*" multiple><br>
-<button id="go">Lancer l'essai</button>
-<canvas id="c" width="1800" height="320"></canvas>
-<video id="v0" muted playsinline style="width:30%"></video><video id="v1" muted playsinline style="width:30%"></video><video id="v2" muted playsinline style="width:30%"></video>
-<pre id="out">En attente.</pre>
+<div id="stage"></div>
+<canvas id="tl" width="1100" height="270"></canvas>
+<div id="msg">Essai en cours : ne touche à rien et laisse cette fenêtre au premier plan.</div>
 <script>
-const out = document.getElementById('out'), res = {};
-const log = () => out.textContent = JSON.stringify(res, null, 2);
-const pct = (a, p) => { a = [...a].sort((x, y) => x - y); return +a[Math.min(a.length - 1, Math.floor(a.length * p))].toFixed(2); };
-res.navigateur = navigator.userAgent; res.coeurs = navigator.hardwareConcurrency;
+// Prototype d'essai : même scénario et mêmes gestes que bench_qt.py. Ne modifie rien ; envoie ses mesures au serveur local
+// du harnais (127.0.0.1 uniquement). Les durées viennent de performance.now() ; les images de requestVideoFrameCallback.
+const q = new URLSearchParams(location.search), variant = q.get('variant') || 'proxy', launch = parseFloat(q.get('launch')) || Date.now() / 1000;
+const res = {toolkit: 'web', variant, metrics: {}, phases: [], errors: [], navigateur: navigator.userAgent};
+const now = () => performance.now(), epoch = () => Date.now() / 1000, sleep = ms => new Promise(r => setTimeout(r, ms));
+const to = (p, ms) => Promise.race([p, new Promise(r => setTimeout(() => r(null), ms))]);
+const err = m => { res.errors.push(String(m)); console.error(m); };
+function summarize(v) {
+  v = v.filter(x => x != null && !isNaN(x)).sort((a, b) => a - b); if (!v.length) return null;
+  const p = f => v[Math.min(v.length - 1, Math.floor(v.length * f))], r = x => Math.round(x * 100) / 100;
+  return {n: v.length, mediane: r(p(.5)), p95: r(p(.95)), max: r(v[v.length - 1])};
+}
+function phase(name) { res.phases.push({name, t0: epoch(), t1: null}); }
+function endPhase() { res.phases[res.phases.length - 1].t1 = epoch(); }
 
-// 1) Timeline de 800 plans : coût de redessin pendant un défilement/zoom
-function timelineTest(N) {
-  const c = document.getElementById('c'), g = c.getContext('2d');
-  const clips = Array.from({length: N}, (_, i) => ({s: i * 90, d: 80 + (i % 7) * 4, t: i % 4}));
-  const times = [];
-  for (let f = 0; f < 240; f++) {
-    const t0 = performance.now(), zoom = 0.2 + (f % 60) / 60, off = f * 150;
-    g.clearRect(0, 0, c.width, c.height);
-    for (const k of clips) {
-      const x = (k.s - off) * zoom; if (x > c.width || x + k.d * zoom < 0) continue;
-      g.fillStyle = ['#3b6ea8', '#5a8f4a', '#a8623b', '#7b5aa8'][k.t]; g.fillRect(x, 10 + k.t * 70, Math.max(1, k.d * zoom - 1), 60);
+// prise en charge des codecs du navigateur (information utile en soi : HEVC/H.265 pour les rushes Sony)
+const vt = document.createElement('video');
+res.codecs_navigateur = {h264: vt.canPlayType('video/mp4; codecs="avc1.640028"'), hevc: vt.canPlayType('video/mp4; codecs="hvc1.1.6.L120.B0"'),
+                         vp9: vt.canPlayType('video/webm; codecs="vp9"'), av1: vt.canPlayType('video/mp4; codecs="av01.0.08M.08"')};
+let posted = false;
+async function post() { if (posted) return; posted = true; try { await fetch('/web_' + variant, {method: 'POST', body: JSON.stringify(res)}); } catch (e) {} }
+setTimeout(() => { err('délai global dépassé : résultats partiels'); post(); }, 360000);   // jamais d'attente infinie
+
+(async () => {
+  const sc = await (await fetch('/scenario.json')).json(), peaks = await (await fetch('/peaks.json')).json();
+  const stage = document.getElementById('stage'), cv = document.getElementById('tl'), g = cv.getContext('2d');
+  const TRACK_H = 26, COLORS = ['#3b6ea8', '#5a8f4a', '#a8623b', '#7b5aa8'];
+  const tl = {zoom: .4, offset: 0, playhead: 0, drag: null};
+  function draw() {
+    g.fillStyle = '#0d0f13'; g.fillRect(0, 0, cv.width, cv.height);
+    for (const k of sc.clips) {
+      const x = (k.start - tl.offset) * tl.zoom, cw = k.dur * tl.zoom;
+      if (x > cv.width || x + cw < 0) continue;
+      const y = k.track * TRACK_H;
+      g.fillStyle = COLORS[k.track % 4]; g.fillRect(x, y + 1, Math.max(1, cw - 1), TRACK_H - 2);
+      if (sc.tracks[k.track].kind === 'audio' && cw > 8 && peaks.length) {
+        const step = Math.max(1, Math.floor(1 / Math.max(tl.zoom, 1e-6) / (sc.fps * .02))), i0 = Math.floor((k.start / sc.fps) / .02) % Math.max(1, peaks.length - 1), mid = y + TRACK_H / 2;
+        g.strokeStyle = 'rgba(255,255,255,.47)'; g.beginPath();
+        for (let dx = 0; dx < Math.floor(cw); dx += 2) { const a = peaks[(i0 + dx * step) % peaks.length] / 255 * (TRACK_H / 2 - 2); g.moveTo(x + dx, mid - a); g.lineTo(x + dx, mid + a); }
+        g.stroke();
+      }
     }
-    times.push(performance.now() - t0);
+    g.strokeStyle = '#ff5050'; g.lineWidth = 2; const px = (tl.playhead - tl.offset) * tl.zoom; g.beginPath(); g.moveTo(px, 0); g.lineTo(px, cv.height); g.stroke(); g.lineWidth = 1;
+    if (tl.drag) { g.fillStyle = 'rgba(255,255,255,.35)'; g.fillRect(tl.drag.x, tl.drag.y, 90, TRACK_H - 2); }
   }
-  res['timeline_' + N + '_plans_ms'] = {mediane: pct(times, .5), p95: pct(times, .95), max: pct(times, 1)};
-}
 
-// 2) Changement d'angle : délai entre la « touche » et l'image du nouvel angle affichée
-async function angleTest(files) {
-  const vids = [0, 1, 2].map(i => document.getElementById('v' + i));
-  files.slice(0, 3).forEach((f, i) => { vids[i].src = URL.createObjectURL(f); });
-  await Promise.all(vids.slice(0, files.length).map(v => new Promise(r => v.onloadeddata = r)));
-  const lat = [];
-  for (let i = 0; i < 30; i++) {
-    const v = vids[i % files.length], t = 1 + (i * 0.37) % Math.max(1, (v.duration || 5) - 2);
-    const t0 = performance.now();
-    await new Promise(r => { v.onseeked = r; v.currentTime = t; });
-    await new Promise(r => requestAnimationFrame(() => r()));
-    lat.push(performance.now() - t0);
+  // Canvas 2D enregistre les commandes et les exécute plus tard : on force la rastérisation (lecture d'un pixel) pour que le
+  // temps mesuré soit comparable à QWidget.repaint(), qui peint de façon synchrone.
+  const flush = () => g.getImageData(0, 0, 1, 1);
+  // un <video> par angle ; un seul est « montré » (grand), les autres continuent d'être décodés
+  const vids = {}; const frames = {}; let winFrames = 0, lastWinFrame = 0, shown = sc.angles[0].id;
+  for (const a of sc.angles) {
+    const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = `/media/${variant}/${a.id}`;
+    v.onerror = () => err(`${a.id}: ${v.error && v.error.message}`); stage.appendChild(v); vids[a.id] = v; frames[a.id] = 0;
+    const cb = () => { frames[a.id]++; if (a.id === shown) { winFrames++; lastWinFrame = epoch(); } v.requestVideoFrameCallback(cb); };
+    v.requestVideoFrameCallback(cb);
   }
-  res.angle_seek_ms = {mediane: pct(lat, .5), p95: pct(lat, .95), max: pct(lat, 1)};
-  // lecture simultanée des angles : images réellement présentées par seconde
-  const n = Math.min(3, files.length); let frames = 0;
-  vids.slice(0, n).forEach(v => { v.currentTime = 0; v.play(); });
-  const t0 = performance.now();
-  await new Promise(r => { const tick = () => { frames++; performance.now() - t0 < 3000 ? requestAnimationFrame(tick) : r(); }; tick(); });
-  const q = vids.slice(0, n).map(v => v.getVideoPlaybackQuality ? v.getVideoPlaybackQuality() : {});
-  res.lecture_simultanee = {angles: n, rafraichissement_fps: +(frames / 3).toFixed(1),
-    images_perdues: q.map(x => x.droppedVideoFrames), images_total: q.map(x => x.totalVideoFrames)};
-  vids.forEach(v => v.pause());
-}
+  const setShown = id => { vids[shown].classList.remove('shown'); shown = id; vids[id].classList.add('shown'); };
+  setShown(shown);
+  const waitFrame = (ms = 3000) => new Promise(r => { const b = winFrames, t0 = now(); (function chk() { if (winFrames > b) r(now() - t0); else if (now() - t0 > ms) r(null); else setTimeout(chk, 1); })(); });
+  const playAll = () => to(Promise.all(Object.values(vids).map(v => v.play().catch(e => err('play: ' + e.message)))), 5000);
+  const seekAll = t => Object.values(vids).forEach(v => v.currentTime = t);
+  const m = res.metrics;
+  try {
+    const loaded = await to(Promise.all(Object.values(vids).map(v => new Promise(r => v.readyState >= 2 ? r(1) : (v.addEventListener('loadeddata', () => r(1), {once: true}), v.addEventListener('error', () => r(0), {once: true}))))), 20000);
+    if (!loaded || loaded.includes(0)) err('un ou plusieurs médias ne se chargent pas dans ce navigateur (codec ?)');
+    phase('startup'); draw(); await playAll(); const w = await waitFrame(15000);
+    m.startup_s = w == null ? null : Math.round((lastWinFrame - launch) * 100) / 100; if (w == null) err('aucune image affichée au démarrage'); endPhase();
 
-document.getElementById('go').onclick = async () => {
-  res.etat = 'en cours'; log();
-  timelineTest(200); timelineTest(800); log();
-  const files = [...document.getElementById('f').files];
-  if (files.length) await angleTest(files); else res.angle = 'aucun fichier choisi : test des angles ignoré';
-  res.etat = 'terminé : copie ce texte et envoie-le'; log();
-};
+    phase('decode_only'); for (const k in frames) frames[k] = 0; seekAll(0); await playAll(); await sleep(5000);
+    m.decode_only = {angles: sc.angles.length, images_par_s_et_angle: Math.round(Object.values(frames).reduce((a, b) => a + b, 0) / 5 / sc.angles.length * 10) / 10}; endPhase();
+
+    phase('ui_playback'); seekAll(0); await playAll(); winFrames = 0;
+    const t0 = now(); let lat = [];
+    const ph = setInterval(() => { tl.playhead = Math.floor((now() - t0) / 1000 * sc.fps); draw(); }, 33);
+    for (const ev of sc.angle_events) {
+      await sleep(Math.max(0, ev.t * 1000 - (now() - t0)));
+      const target = sc.angles[Math.min(ev.key, sc.angles.length) - 1].id; if (target === shown) continue;
+      const a = now(); setShown(target); const w2 = await waitFrame(2000); if (w2 != null) lat.push(now() - a);
+    }
+    await sleep(Math.max(0, sc.play_s * 1000 - (now() - t0))); clearInterval(ph);
+    const el = (now() - t0) / 1000; m.ui_playback = {images_par_s: Math.round(winFrames / el * 10) / 10, duree_s: Math.round(el * 10) / 10};
+    m.angle_switch_parallel_ms = summarize(lat); endPhase();
+
+    phase('play_pause'); lat = []; const pv = () => vids[shown];
+    for (let i = 0; i < sc.play_pause; i++) {
+      let a = now(); const paused = new Promise(r => pv().addEventListener('pause', () => r(1), {once: true})); pv().pause(); if (await to(paused, 2000)) lat.push(now() - a);
+      await sleep(100); a = now(); const b = winFrames; pv().play(); const w3 = await waitFrame(2000); if (w3 != null) lat.push(now() - a); await sleep(100);
+    }
+    m.play_pause_ms = summarize(lat); endPhase();
+
+    phase('scrub'); pv().pause(); await sleep(200); lat = [];
+    for (const pos of sc.scrubs) { const a = now(); pv().currentTime = pos; const w4 = await waitFrame(2000); if (w4 != null) lat.push(now() - a); }
+    m.scrub_ms = summarize(lat); endPhase();
+
+    phase('angle_switch_seek'); Object.values(vids).forEach(v => v.pause()); lat = [];
+    const one = vids[sc.angles[0].id]; setShown(sc.angles[0].id);
+    for (const ev of sc.angle_events.slice(0, 15)) {
+      const cid = sc.angles[Math.min(ev.key, sc.angles.length) - 1].id, a = now();
+      one.src = `/media/${variant}/${cid}`; one.currentTime = ev.t; one.play().catch(e => { if (e.name !== 'AbortError') err('play: ' + e.message); });
+      const w5 = await waitFrame(4000); if (w5 != null) lat.push(now() - a);
+    }
+    one.pause(); m.angle_switch_seek_ms = summarize(lat); endPhase();
+
+    phase('timeline_pan_zoom'); let times = [];
+    for (let f = 0; f < sc.pan_zoom_frames; f++) { tl.zoom = .1 + (f % 60) / 40; tl.offset = f * 150; const a = now(); draw(); flush(); times.push(now() - a); await new Promise(r => requestAnimationFrame(r)); }
+    m.timeline_pan_zoom_ms = summarize(times); endPhase();
+
+    phase('drag_io'); times = [];
+    for (const d of sc.drags) for (let s = 0; s < 20; s++) { tl.drag = {x: d.x0 + d.dx * s / 20, y: d.y0 + d.dy * s / 20}; const a = now(); draw(); flush(); times.push(now() - a); await new Promise(r => requestAnimationFrame(r)); }
+    tl.drag = null; m.drag_io_ms = summarize(times); endPhase();
+  } catch (e) { err(e && e.stack || e); }
+  document.getElementById('msg').textContent = 'Terminé : envoi des mesures.';
+  await post();
+})();
 </script>
