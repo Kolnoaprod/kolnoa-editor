@@ -7,12 +7,18 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 - Même cœur pour la ligne de commande et l'interface : l'interface appelle les fonctions de `sync/` et `sync/calibrate.py`, sans logique dupliquée.
 - Un résultat « incertain » n'est jamais appliqué sans action explicite.
 
+- **Une seule timeline native**, non destructive, utilisée par l'interface manuelle comme par le moteur de prompts ; aucun rendu final n'est nécessaire pour modifier le montage.
+- Chaque action de l'IA produit des opérations éditables, annulables et réversibles. Annuler/rétablir, sauvegarde, restauration et historique des modifications font partie du modèle de projet.
+- Les développements indépendants peuvent avancer en parallèle mais convergent vers un seul modèle de projet.
+
 ## 1 bis. Montage prompt-first avec retouches ancrées
 - Par défaut tout se fait par prompt ; l'éditeur sert à regarder et à retoucher complètement à la main.
 - **Retouche ancrée** : l'utilisateur avance dans l'aperçu, s'arrête, écrit un prompt (« ici, passe sur CAM 2 », « raccourcis ce silence ») ; il est rattaché au plan source et au temps (`comments.py`), pas au temps du rendu.
 - **File de retouches** : plusieurs retouches peuvent être posées à la suite ; elles s'exécutent ensuite en lot (bouton « Appliquer les retouches »), chacune restant `open`, `done` ou `orphan`.
 - **Progression visible** : dès qu'un prompt ou un lot est lancé, une barre indique l'étape (lecture, analyse, calcul des opérations, vérification des verrous), la retouche en cours, une estimation du temps et un bouton Annuler ; elle repose sur le `TaskRunner` (§2).
 - **Diff avant validation** : le lot produit une liste d'opérations lisible (durée avant/après, verrous respectés) ; validation totale, partielle ou refus ; chaque validation crée une version comparable.
+- Possibilité de créer un montage complet par prompt, ou de poser plusieurs instructions à des positions précises ; les prompts utilisent exactement les mêmes opérations que les outils manuels.
+- Aucune promesse de fiabilité sur l'analyse des paroles, des émotions ou des scènes avant validation sur de vrais rushes.
 - **Parité** : toute action manuelle est une opération ; toute opération de l'IA est modifiable à la main ; ce qui est posé à la main devient un verrou que l'IA ne défait pas au prompt suivant.
 - **Éditeur manuel, par étapes** : lecture et sélection, puis coupes / déplacements / changement d'angle, puis audio, vitesse, transitions, couleur.
 - **Hors ligne** : les opérations manuelles marchent sans clé API ; les fournisseurs d'IA sont optionnels.
@@ -33,6 +39,7 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 ### Choix de la piste audio
 - Pour chaque groupe multicam, le logiciel **propose** la meilleure source audio d'après des mesures sur les pistes synchronisées : niveau et plage dynamique, bruit de fond, saturation (clipping), silences, bande passante, présence de parole ; le score est indicatif et les mesures sont affichées.
 - L'utilisateur peut **imposer** sa piste préférée (par groupe, par scène ou pour tout le projet) ; ce choix devient un verrou que les prompts respectent.
+- Plusieurs sources audio possibles selon la séquence (discours, ambiance, musique, cérémonie) ; la synchronisation est préservée après découpage, changement d'angle ou insertion de plans.
 - Les pistes des caméras servent de repère (« guide ») quand elles sont exploitables ; sinon elles sont ignorées pour le son.
 - Le traitement suit la source retenue : normalisation du niveau, mono → dual mono, fondus ; réduction de bruit seulement si demandée.
 
@@ -48,7 +55,9 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 ### Placement et indépendance des pistes
 - Par défaut, déplacer ou poser un plan sur une autre piste que la piste multicam ne décale rien, ni avant ni après.
 - Aimantation (magnet) activable : bords des clips, coupes, marqueurs, tête de lecture.
-- Modes d'édition explicites : **écraser** (par défaut), **insérer** (décale la suite sur la piste visée), ripple activable et désactivable ; verrou par piste.
+- Trois modes distincts : **écraser** (par défaut), **insérer** avec décalage de la suite sur la piste visée, **remplacer** ; ripple activable et désactivable ; verrou par piste.
+- Outils : lame, trim, ripple trim, roll trim, compensation des plans voisins ; coupes liées image/son par défaut, avec possibilité de dissocier les pistes.
+- Waveforms, zoom temporel, lecture fluide (proxies) et indicateurs de rendu.
 - Compensation : rallonger ou raccourcir le plan précédent ou suivant (poignées, limitées par la durée du rush source), pour combler ou absorber un plan intercalé.
 - Un clip posé à la main devient un verrou que les prompts respectent.
 
@@ -58,12 +67,22 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 - Tests sur le `TaskRunner` (progression, annulation, erreur), pas sur l'affichage.
 
 ## 3. Onglet Synchro / Calibration
+- Analyse asynchrone : l'interface n'est jamais bloquée.
+- Synchro audio automatique seulement quand elle est fiable ; sinon alignement manuel assisté. Sur la MAIRIE mesurée, les caméras n'ont pas d'audio exploitable : synchronisation manuelle assistée, sans forcer une corrélation audio.
+- Drone supposé muet (à confirmer sur les vrais rushes, non mesuré) : propositions visuelles uniquement, validation humaine obligatoire.
+- Vue de vérification image par image et verrouillage des angles synchronisés ; une synchro incertaine n'est jamais appliquée automatiquement.
 - Entrées : dossier des rushes, scénario (MAIRIE, préparatifs, libre), indices (horodatage, visuel expérimental).
 - Boutons : Plan (dry-run) puis Analyser. Garde-fous repris de `sync-calibrate` : lecture seule, instantané taille/mtime avant/après, rapport refusé dans les rushes.
 - Résultats : tableau par angle (décalage, dérive, statut, confiance indicative, notes), angles sans audio signalés, actions Accepter / Régler à la main, aperçu des pistes alignées.
 - Rapports (md/json/csv) écrits dans un dossier choisi, hors dépôt public.
 
 ## 4. Couleur par angle (nouveau)
+### Pipeline et prudence
+- Pipeline colorimétrique non destructif et cohérent : conversion de l'espace source vers un espace de travail commun.
+- Détection des métadonnées Sony et drone lorsqu'elles existent, **sans supposer un profil LOG non confirmé** (l'utilisateur confirme en cas de doute).
+- Correction par angle, par clip ou globale ; LUT compatibles et documentées, avec espaces d'entrée/sortie.
+- Une LUT n'est jamais intégrée au projet sans vérification de ses droits d'utilisation.
+
 ### Modèle (opération `color_grade`, par angle ou par clip)
 - `input_profile` : `auto` | `s-cinetone` | `s-log3` | `rec709` | autre (détection à partir des métadonnées si possible, sinon choix manuel).
 - `lut` : référence à un fichier `.cube` (chemin + empreinte), `lut_strength` 0–100 %.
@@ -82,14 +101,12 @@ Statut : proposition à valider (aucun code). Maquette visuelle : voir la conver
 ### Hors périmètre initial
 - Étalonnage par masques, courbes, suivi, scopes avancés.
 
-## 5. Découpage proposé des PR (à valider ; modifie l'ordre D/E d'origine)
-1. PR C0 : modèle `color_grade` + ops + CLI + rendu ffmpeg + tests (sans interface).
-2. PR C1 : `TaskRunner` + onglet Synchro / Calibration.
-3. PR C2 : onglet Montage (aperçu, timeline en lecture et sélection, barre de prompt, retouches ancrées, file et diff).
-4. PR E1 : prompts → opérations (montage de base, retouches par lot) ; les 6 prompts d'acceptation de l'issue #2 servent de tests de bout en bout.
-5. PR C3 : édition manuelle de la timeline (coupes, déplacements, angles), puis audio / vitesse / transitions.
-6. PR C4 : onglet Couleur.
-7. PR D : rendu multicam, transitions, compensation de dérive.
+## 5. Ordre de réalisation (validé par la revue ChatGPT)
+C0 modèle couleur → C1 tâches et synchro (onglet) → C2 timeline native → C3 montage manuel → C4 couleur (onglet) → E1 prompts → D intégration du rendu final et transitions.
+Une branche et une PR par étape ; rien n'est fusionné sans validation ; avant chaque grande phase, les choix techniques sont documentés et une revue est demandée à ChatGPT sur GitHub.
+
+## 5 bis. Validation
+Tests sur un mariage réel de calibration (rushes jamais publiés dans le dépôt) : précision de la synchro, performances de lecture, stabilité de la timeline, sauvegarde et réouverture, fidélité du rendu exporté.
 
 ## 6. Questions ouvertes
 - Boîte à outils graphique (Qt ou interface web locale) : à trancher avant C1.
