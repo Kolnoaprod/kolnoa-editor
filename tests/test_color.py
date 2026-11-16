@@ -293,7 +293,9 @@ def test_cli_color_set_show_clear_and_undo(mariage, capsys, tmp_path):
 
 def test_end_to_end_render_applies_color_and_never_touches_the_originals(mariage, tmp_path):
     src = mariage / "MAIRIE" / "A7IV" / "20261011_C4837.MP4"
-    before = (src.stat().st_size, src.stat().st_mtime_ns)
+    import hashlib
+    digest = lambda: hashlib.sha256(src.read_bytes()).hexdigest()  # noqa: E731
+    before = (src.stat().st_size, src.stat().st_mtime_ns, digest())
     dl = DecisionList(title="T", resolution=(640, 360), segments=[Segment("s001", "MAIRIE/A7IV/20261011_C4837.MP4", 0.0, 2.0)])
     f = tmp_path / "v1.json"
     dl.save(f)
@@ -315,4 +317,22 @@ def test_end_to_end_render_applies_color_and_never_touches_the_originals(mariage
     assert chroma_spread() < 3                                              # le rendu est devenu gris
     assert main(["color-clear", root, "global"]) == 0
     assert abs(chroma_spread() - colored) <= 1                              # retirer la couleur redonne l'image d'origine
-    assert (src.stat().st_size, src.stat().st_mtime_ns) == before          # original intact
+    assert (src.stat().st_size, src.stat().st_mtime_ns, digest()) == before   # original intact (octet pour octet)
+
+
+def test_multicam_group_and_color_coexist_and_undo_everything(tmp_path):
+    """Non-régression PR #9 : la couleur ne touche ni la synchro des angles ni les plans multicam."""
+    tl = tl_multicam()
+    snap = tl.canonical()
+    multicam_before = [c for c in snap["clips"] if c["group"]] , snap["groups"]
+    invs = [execute(tl, SetColorGrade("angle:g001/A7", ColorGrade(exposure_ev=0.5).to_dict())),
+            execute(tl, SetColorGrade("clip:s010", ColorGrade(saturation=-20).to_dict())),
+            execute(tl, SetColorGrade("global", ColorGrade(contrast=10).to_dict()))]
+    after = tl.canonical()
+    assert (([c for c in after["clips"] if c["group"]], after["groups"])) == multicam_before   # clips et groupes identiques
+    tl.validate()
+    for inv in reversed(invs):
+        execute(tl, inv)
+    assert tl.canonical() == snap
+    d = Timeline.from_dict(tl.to_dict())
+    assert d.canonical() == snap
