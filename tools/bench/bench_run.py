@@ -282,12 +282,12 @@ def prepare(media: list[str | Path], out: Path, audio=None, play_seconds: float 
         raise RuntimeError("ffmpeg et ffprobe sont introuvables (ils devraient être inclus dans le programme).")
     log("Lecture des informations des vidéos…")
     infos = [bc.probe(s_) for s_ in srcs]
-    angles = [{"id": f"C{i + 1}", "key": i + 1, "name": m["name"], "duration_s": m["duration_s"]} for i, m in enumerate(infos)]
+    angles = [{"id": f"C{i + 1}", "key": i + 1, "name": m["name"], "duration_s": min(m["duration_s"], bc.PROXY_MAX_S)} for i, m in enumerate(infos)]
     proxies = {}
     for ang, s_ in zip(angles, srcs):
         p = out / "proxies" / f"{ang['id']}.mp4"
         if not p.exists():
-            log(f"Création de la copie légère de {s_.name} (une seule fois)…")
+            log(f"Création de la copie légère de {s_.name} (90 premières secondes, ~1 min)…")
             bc.make_proxy(s_, p)
         proxies[ang["id"]] = p
     log("Formes d'onde et scénario…")

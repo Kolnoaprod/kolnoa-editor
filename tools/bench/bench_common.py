@@ -65,13 +65,16 @@ def probe(path: str | Path) -> dict:
     return info
 
 
-def make_proxy(src: str | Path, dst: str | Path, height: int = 540) -> None:
+PROXY_MAX_S = 90          # le test n'a besoin que de 90 s par caméra : on n'encode pas des rushes entiers
+
+
+def make_proxy(src: str | Path, dst: str | Path, height: int = 540, max_s: float | None = PROXY_MAX_S) -> None:
     """Proxy de lecture fluide : H.264 basse résolution, une image clé par seconde, audio AAC. N'écrase jamais la source."""
     src, dst = Path(src), Path(dst)
     if src.resolve() == dst.resolve():
         raise ValueError("le proxy ne peut pas écraser la source")
     fps = probe(src).get("fps") or 25
-    run_capture(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264",
+    run_capture(["ffmpeg", "-y", "-v", "error", *(["-t", str(max_s)] if max_s else []), "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264",
                  "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", "-g", str(max(1, round(fps))),
                  "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(dst)])
 
