@@ -24,6 +24,8 @@ from .sync.sources import FileSource
 from .sync.visual import VisualCandidate, accept_candidate, luma_series, propose_visual_sync
 from .timeline import (AddGroup, Session, execute, Transaction, TimelineError, accept_angle, from_decision_list, lock_angle,
                        nudge_angle, op_from_dict, to_decision_list)
+from .timeline.color import grade_warnings
+from .timeline.ops import SetColorGrade
 from .versions import import_version, load_version
 
 
@@ -346,6 +348,53 @@ def cmd_mc_at(args) -> int:
     return 0
 
 
+def cmd_color_set(args) -> int:
+    from .timeline.color import ColorGrade
+    sess = _session(_project(args))
+    cur = sess.tl.grades.get(args.scope)
+    d = dict(cur) if cur else ColorGrade().to_dict()
+    for key in ("input_profile", "exposure_ev", "temperature_k", "tint", "contrast", "saturation", "lut_strength", "note"):
+        v = getattr(args, key)
+        if v is not None:
+            d[key] = v
+    if args.lut:
+        d["lut"] = {"path": args.lut, "input_space": args.lut_input, "output_space": args.lut_output,
+                    "rights": "confirmed" if args.lut_rights_confirmed else "unknown"}
+    elif args.no_lut:
+        d["lut"] = None
+    if args.disable:
+        d["enabled"] = False
+    elif args.enable:
+        d["enabled"] = True
+    for line in sess.do(SetColorGrade(args.scope, d)):
+        print(line)
+    for w in grade_warnings(sess.tl):
+        print(f"ATTENTION : {w}", file=sys.stderr)
+    return 0
+
+
+def cmd_color_clear(args) -> int:
+    sess = _session(_project(args))
+    for line in sess.do(SetColorGrade(args.scope, None)):
+        print(line)
+    return 0
+
+
+def cmd_color_show(args) -> int:
+    from .timeline.color import ColorGrade
+    sess = _session(_project(args))
+    if not sess.tl.grades:
+        print("Aucun réglage de couleur.")
+    for scope, d in sorted(sess.tl.grades.items()):
+        g = ColorGrade.from_dict(d)
+        print(f"{scope}: {g.describe()}{'' if g.enabled else '  (désactivé)'}")
+    project = _project(args)
+    exists = lambda p: (Path(p) if Path(p).is_absolute() else project.root / p).is_file()  # noqa: E731
+    for w in grade_warnings(sess.tl, exists):
+        print(f"ATTENTION : {w}", file=sys.stderr)
+    return 0
+
+
 def cmd_tl_undo(args) -> int:
     print(f"Annulé : {_session(_project(args)).undo()}")
     return 0
@@ -495,6 +544,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("group")
     s.add_argument("angle")
     s.add_argument("frames", type=int)
+    s = add("color-set", "Pose ou modifie un réglage de couleur (non destructif) : global, clip:<id> ou angle:<groupe>/<angle>", cmd_color_set)
+    s.add_argument("scope")
+    s.add_argument("--profile", dest="input_profile", help="auto, rec709, s-cinetone, s-log3, hlg, autre (auto = non confirmé)")
+    s.add_argument("--exposure", dest="exposure_ev", type=float, help="exposition en IL (-4 à 4)")
+    s.add_argument("--temperature", dest="temperature_k", type=float, help="décalage en K (> 0 plus chaud)")
+    s.add_argument("--tint", type=float, help="teinte (> 0 vers le magenta)")
+    s.add_argument("--contrast", type=float)
+    s.add_argument("--saturation", type=float)
+    s.add_argument("--lut", help="fichier .cube (chemin conservé tel quel, jamais copié dans le projet)")
+    s.add_argument("--lut-input", help="espace d'entrée déclaré de la LUT")
+    s.add_argument("--lut-output", help="espace de sortie déclaré de la LUT")
+    s.add_argument("--lut-rights-confirmed", action="store_true", help="j'ai vérifié le droit d'utiliser cette LUT")
+    s.add_argument("--lut-strength", type=float, help="intensité de la LUT, 0 à 1")
+    s.add_argument("--no-lut", action="store_true")
+    s.add_argument("--note")
+    s.add_argument("--disable", action="store_true")
+    s.add_argument("--enable", action="store_true")
+    s = add("color-clear", "Retire le réglage de couleur d'une portée", cmd_color_clear)
+    s.add_argument("scope")
+    add("color-show", "Liste les réglages de couleur et leurs avertissements", cmd_color_show)
+
     s = add("multicam-lock", "Verrouille (ou déverrouille) la synchro d'un angle", cmd_mc_lock)
     s.add_argument("group")
     s.add_argument("angle")

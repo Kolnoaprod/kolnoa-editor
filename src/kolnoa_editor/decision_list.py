@@ -33,6 +33,7 @@ class Segment:
     fade_out: float = 0.0
     note: str = ""            # intention de montage, lisible par l'humain et l'IA
     parent: str | None = None  # filiation : id du segment dont celui-ci est issu (scission)
+    color: list | None = None  # pile de réglages de couleur [{...}] appliquée au rendu (non destructif)
 
     @property
     def duration(self) -> float:
@@ -173,6 +174,9 @@ class DecisionList:
     def to_dict(self) -> dict:
         d = asdict(self)
         d["resolution"] = list(self.resolution)
+        for seg in d["segments"]:
+            if seg.get("color") is None:
+                seg.pop("color", None)   # les listes sans couleur gardent exactement leur forme d'avant
         return d
 
     @classmethod

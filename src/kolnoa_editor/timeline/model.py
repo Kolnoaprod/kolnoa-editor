@@ -133,6 +133,7 @@ class Timeline:
     groups: list[MulticamGroup] = field(default_factory=list)
     retired: list[str] = field(default_factory=list)
     schema: int = SCHEMA
+    grades: dict[str, dict] = field(default_factory=dict)   # portée -> réglage de couleur (color.py)
 
     # --- accès ---------------------------------------------------------
     def track(self, track_id: str) -> Track:
@@ -247,6 +248,7 @@ class Timeline:
                     raise TimelineError(f"chevauchement sur {tid} : {prev.id} et {c.id}")
                 prev = c
         self._validate_groups()
+        self._validate_grades()
         mseen: set[str] = set()
         for m in self.markers:
             if m.id in mseen:
@@ -254,6 +256,13 @@ class Timeline:
             mseen.add(m.id)
             if m.frame < 0 or m.kind not in MARKER_KINDS:
                 raise TimelineError(f"{m.id}: repère invalide")
+
+    def _validate_grades(self) -> None:
+        from .color import ColorError, validate_grades
+        try:
+            validate_grades(self)
+        except ColorError as exc:
+            raise TimelineError(f"couleur : {exc}") from exc
 
     def _validate_groups(self) -> None:
         gseen: set[str] = set()
@@ -326,6 +335,7 @@ class Timeline:
                                       angles=[Angle(**a) for a in g.get("angles", [])])
                         for g in d.get("groups", [])],
                 retired=list(d.get("retired", [])), schema=int(d["schema"]),
+                grades=copy.deepcopy(d.get("grades", {})),
             )
         except (KeyError, TypeError) as exc:
             raise TimelineError(f"Timeline mal formée : {exc}") from exc
