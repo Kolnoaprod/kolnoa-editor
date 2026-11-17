@@ -15,13 +15,13 @@ def frames_of(tl, clips, lo_of, to_axis, eps, window=None):
     out = []
     for c in clips:
         if window is not None:      # simple élagage : un plan dont la source entière est hors fenêtre n'a aucune image concernée
-            lo = to_axis(c, F(c.src_in * 1_000_000).limit_denominator(10**9))
-            hi = to_axis(c, F(c.src_in * 1_000_000).limit_denominator(10**9) + F(c.duration * 1_000_000, tl.fps))
+            lo = to_axis(c, F(round(c.src_in * 1_000_000)))
+            hi = to_axis(c, F(round(c.src_in * 1_000_000)) + F(c.duration * 1_000_000, tl.fps))
             if hi < window[0] - 5 or lo > window[1] + 5:
                 continue
         for f in range(c.duration):
-            a = to_axis(c, F(c.src_in * 1_000_000).limit_denominator(10**9) + F(f * 1_000_000, tl.fps))
-            b = to_axis(c, F(c.src_in * 1_000_000).limit_denominator(10**9) + F((f + 1) * 1_000_000, tl.fps))
+            a = to_axis(c, F(round(c.src_in * 1_000_000)) + F(f * 1_000_000, tl.fps))
+            b = to_axis(c, F(round(c.src_in * 1_000_000)) + F((f + 1) * 1_000_000, tl.fps))
             out.append((c, f, a, b))
     return out
 
