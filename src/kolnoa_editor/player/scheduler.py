@@ -48,9 +48,18 @@ class Slot:
     cost: float
 
 
+class Plan(list):
+    """Liste de `Slot` + compte rendu : le budget dépassé ou un proxy manquant n'est JAMAIS silencieux."""
+    spent: float = 0.0
+    budget: float = 0.0
+    over_budget: bool = False
+    missing_proxy: tuple = ()
+    warnings: tuple = ()
+
+
 def plan(angles: dict[str, MediaInfo], active: str, t_group_to_angle, t: float, *, budget: float,
          upcoming: list[tuple[float, str]] = (), lookahead: float = 3.0, hw_decode: bool = False,
-         allow_source: bool = True, max_warm: int = 9) -> list[Slot]:
+         allow_source: bool = True, max_warm: int = 9) -> Plan:
     """`t_group_to_angle(angle_id, t)` → temps dans l'angle. `upcoming` = [(t_groupe, angle)] coupes à venir."""
     if active not in angles:
         raise KeyError(f"angle actif inconnu : {active}")
@@ -69,8 +78,12 @@ def plan(angles: dict[str, MediaInfo], active: str, t_group_to_angle, t: float, 
     others = [a for a in angles if a != active and present(a)]
     reserve = sum(angles[a].proxy_cost for a in others[:max_warm - 1] if angles[a].proxy)
     use_source = allow_source and (hw_decode or act.source_cost <= budget * 0.5) and act.source_cost + reserve <= budget
+    warnings: list[str] = []
+    missing: list[str] = [a for a, i in angles.items() if i.proxy is None and present(a)]
     if act.proxy is None or use_source:
         q, path, cost = "source", act.source, act.source_cost
+        if act.proxy is None and act.source_cost > budget:
+            warnings.append(f"{active}: pas de proxy et la source ({act.source_cost:.2e} px/s) dépasse le budget ({budget:.2e}) : lecture fluide non garantie")
     else:
         q, path, cost = "proxy", act.proxy, act.proxy_cost
     if not present(active):
@@ -99,4 +112,18 @@ def plan(angles: dict[str, MediaInfo], active: str, t_group_to_angle, t: float, 
             slots[a] = Slot(a, PAUSED, "proxy" if info.proxy else "source", path, 4, 0.0)
     for a in angles:
         slots.setdefault(a, Slot(a, COLD, None, None, 9, 0.0))
-    return [slots[a] for a in angles]
+    out = Plan(slots[a] for a in angles)
+    out.spent, out.budget = spent, budget
+    out.over_budget = spent > budget + 1e-9
+    for a in missing:
+        if a != active:
+            sl = slots[a]
+            if sl.role == PAUSED:
+                warnings.append(f"{a}: pas de proxy et la source ne tient pas dans le budget : angle en pause (ré-aligné, pas lu en continu)")
+            else:
+                warnings.append(f"{a}: pas de proxy, lu en source ({sl.cost:.2e} px/s)")
+    out.missing_proxy = tuple(missing)
+    if out.over_budget:
+        warnings.append(f"budget dépassé : {spent:.2e} > {budget:.2e} px/s")
+    out.warnings = tuple(warnings)
+    return out

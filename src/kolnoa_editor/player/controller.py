@@ -24,7 +24,10 @@ ACTIVE_SOFT_ERR = 0.020
 HARD_ERR = 0.250        # s : au-delà, on re-seeke
 NUDGE_GAIN = 1.0        # correction de vitesse = 1 - gain*err (bornée)
 MAX_NUDGE = 0.05        # ± 5 % de vitesse au maximum
-PAUSED_REFRESH = 0.5    # s : on ré-aligne un lecteur en pause au plus toutes les 0,5 s de lecture
+PAUSED_REFRESH_WALL = 0.5   # s RÉELLES : cadence de ré-alignement d'un angle « en pause » pendant la lecture (coût de décodage = temps réel,
+                            # donc indépendant de la vitesse de lecture ; l'écart toléré, lui, reste en secondes MÉDIA)
+IDLE_REFRESH_WALL = 0.10    # s réelles : horloge en pause, anti-rafale entre deux re-seeks d'un angle qui n'a pas encore atterri
+SEEK_SETTLE_WALL = 0.60     # s réelles : un seek émis est « en vol » ce temps-là (ou jusqu'à ce que le lecteur atterrisse)
 SWAP_TOL = 0.080        # s : écart toléré pour afficher l'image d'un angle prêt
 SWAP_TIMEOUT = 0.75     # s : si l'angle n'est pas prêt après ce délai, on force le basculement (le temps d'attente est mesuré)
 
@@ -36,6 +39,8 @@ class Stats:
     reseeks: int = 0
     nudges: int = 0
     replans: int = 0
+    over_budget_replans: int = 0
+    seeks_issued: int = 0
 
 
 class MulticamPlayer:
@@ -54,7 +59,10 @@ class MulticamPlayer:
             raise TimelineError("aucun angle image lisible dans ce groupe")
         self.backends: dict[str, AngleBackend] = {a: backend_factory(a) for a in media}
         self._open: dict[str, Slot] = {}
-        self._last_refresh: dict[str, float] = {}
+        self._last_refresh: dict[str, float] = {}        # instants RÉELS (self._now) du dernier seek par angle
+        self._pending: dict[str, tuple[float, float]] = {}   # angle -> (cible média, instant réel d'émission)
+        self.report = None
+        self.warnings: tuple = ()
         self.intent = self.keys[0]       # angle demandé
         self.shown = self.keys[0]        # angle effectivement affiché
         self._intent_at = self._now()
@@ -63,6 +71,27 @@ class MulticamPlayer:
         self.stats = Stats()
         self.slots: list[Slot] = []
         self._dirty = True
+
+    def _seek(self, a: str, target: float) -> None:
+        target = max(0.0, target)
+        self.backends[a].seek(target)
+        now = self._now()
+        self._last_refresh[a] = now
+        self._pending[a] = (target, now)
+        self.stats.seeks_issued += 1
+
+    def _in_flight(self, a: str, target: float) -> bool:
+        """Un seek émis récemment n'a pas encore atterri : on n'en émet pas un second par-dessus (anti-rafale)."""
+        pend = self._pending.get(a)
+        if not pend:
+            return False
+        if self._now() - pend[1] >= SEEK_SETTLE_WALL:
+            self._pending.pop(a, None)
+            return False
+        if abs(self.backends[a].position() - target) <= SOFT_ERR:
+            self._pending.pop(a, None)
+            return False
+        return True
 
     # --- temps -----------------------------------------------------------------------------------------------
     def t_angle(self, angle_id: str, t: float) -> float:
@@ -86,9 +115,8 @@ class MulticamPlayer:
 
     def seek(self, t: float) -> None:
         self.clock.seek(t)
-        for a, s in self._open.items():
-            self.backends[a].seek(max(0.0, self.t_angle(a, t)))
-        self._last_refresh.clear()
+        for a in self._open:
+            self._seek(a, self.t_angle(a, t))                 # le dernier seek gagne : chacun écrase le « en vol » précédent
         self._dirty = True
         self.tick()
 
@@ -125,6 +153,9 @@ class MulticamPlayer:
         self.slots = plan(self.media, self.intent, self.t_angle, t, budget=self.budget, upcoming=self._upcoming(),
                           lookahead=self.lookahead, hw_decode=self.hw_decode)
         self.stats.replans += 1
+        self.report, self.warnings = self.slots, self.slots.warnings
+        if self.slots.over_budget:
+            self.stats.over_budget_replans += 1
         want = {s.angle: s for s in self.slots}
         for a, s in want.items():
             be, cur = self.backends[a], self._open.get(a)
@@ -135,8 +166,7 @@ class MulticamPlayer:
                 continue
             if cur is None or (cur.path, cur.quality) != (s.path, s.quality):
                 be.open(s.path, s.quality)
-                be.seek(max(0.0, self.t_angle(a, t)))
-                self._last_refresh[a] = t
+                self._seek(a, self.t_angle(a, t))
             be.set_priority(s.priority)
             self._open[a] = s
         self._dirty = False
@@ -145,17 +175,21 @@ class MulticamPlayer:
         be = self.backends[a]
         target = self.t_angle(a, t)
         playing = self.clock.playing
+        wall = self._now()
         if s.role == PAUSED or not playing:
-            # en pause (ou lecteur « PAUSED ») : recalage espacé
+            # horloge en pause, ou angle « PAUSED » : on le garde à l'arrêt et on le ré-aligne à cadence RÉELLE bornée
             be.pause()
-            if abs(be.position() - target) > SOFT_ERR and t - self._last_refresh.get(a, -1e9) >= PAUSED_REFRESH * (1 if not playing else 1):
-                be.seek(max(0.0, target))
-                self._last_refresh[a] = t
+            if abs(be.position() - target) > SOFT_ERR and not self._in_flight(a, target):
+                gap = IDLE_REFRESH_WALL if not playing else PAUSED_REFRESH_WALL
+                if wall - self._last_refresh.get(a, -1e9) >= gap:
+                    self._seek(a, target)
             return
+        if self._in_flight(a, target):
+            return                                                # un seek vient d'être émis : on attend qu'il atterrisse
         err = be.position() - target
         tol = ACTIVE_SOFT_ERR if s.role == ACTIVE else SOFT_ERR
         if abs(err) > HARD_ERR:
-            be.seek(max(0.0, target))
+            self._seek(a, target)
             be.play(self.clock.rate)
             self.stats.reseeks += 1
         elif abs(err) > tol:
