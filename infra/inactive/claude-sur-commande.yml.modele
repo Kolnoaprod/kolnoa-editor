@@ -1,0 +1,50 @@
+# ╔══════════════════════════════════════════════════════════════════════════════════════════════╗
+# ║ MODÈLE INACTIF — NE PAS COPIER dans .github/workflows/ sans accord écrit du réalisateur.     ║
+# ║ Ce fichier n'a PAS l'extension .yml : GitHub ne le lit pas, il ne peut rien déclencher.        ║
+# ║ Budget : 0 € définitif. Activer ce modèle est INTERDIT tant que docs/INFRA_REVUE_ASSISTEE.md   ║
+# ║ §4 (vérification d'absence de frais) n'est pas validé par le réalisateur.                      ║
+# ╚══════════════════════════════════════════════════════════════════════════════════════════════╝
+# Intention : Claude Code intervient UNIQUEMENT à la demande explicite du réalisateur (déclenchement manuel),
+# sur une PR du dépôt lui-même (jamais un fork), avec droits minimaux, sans fusion, sans clé API facturée.
+# Authentification prévue : jeton d'abonnement `CLAUDE_CODE_OAUTH_TOKEN` (Actions Secrets) — JAMAIS une clé API.
+# Rien d'OpenAI : `openai/codex-action` exige une clé API facturée à l'usage → exclu du périmètre.
+#
+# Les noms d'inputs de l'action (`claude_code_oauth_token`, `claude_args`, `prompt`) sont à RE-VÉRIFIER contre la documentation
+# officielle de `anthropics/claude-code-action` au moment d'une éventuelle activation (non lue ici : page hors liste autorisée).
+
+name: claude-sur-commande
+on:
+  workflow_dispatch:                      # SEUL déclencheur : manuel. Pas de issue_comment, pas de pull_request, pas de schedule.
+    inputs:
+      pr_number: {description: "N° de la PR (même dépôt)", required: true}
+      consigne:  {description: "Ce que Claude doit faire (texte libre, jamais exécuté comme commande)", required: true}
+
+permissions: {}                           # rien par défaut ; chaque job déclare le minimum
+
+concurrency:
+  group: claude-sur-commande              # un seul run à la fois, pas de file d'attente
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    if: github.actor == github.repository_owner      # le réalisateur seul ; les bots (github.actor se terminant par [bot]) sont refusés
+    runs-on: ubuntu-latest                           # runner standard : gratuit en dépôt public (vérifié, voir doc §3). Jamais « larger ».
+    timeout-minutes: 15
+    permissions:
+      contents: write                                # pousser sur la branche de la PR (pas sur main : voir protection de branche)
+      pull-requests: write
+      id-token: write                                # requis par l'action pour l'échange d'identité (à confirmer dans sa doc)
+    steps:
+      - name: Refuser une PR de fork et une PR déjà traitée pour ce SHA
+        run: |
+          # à écrire à l'activation : vérifier head.repo.full_name == repository, et l'absence du marqueur
+          # "<!-- claude-sha:<SHA> -->" dans les commentaires (idempotence par commit), plafond de 2 tours par PR.
+          echo "gabarit : étape volontairement non exécutable"; exit 1
+      # - uses: actions/checkout@v4   (ref: la branche de la PR, jamais pull_request_target)
+      # - uses: anthropics/claude-code-action@v1
+      #   with:
+      #     claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      #     claude_args: |
+      #       --max-turns 8
+      #       --disallowedTools "WebFetch,WebSearch"
+      #     (aucune exécution de commandes issues d'un commentaire ; la consigne est passée comme DONNÉE)
