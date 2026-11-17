@@ -21,7 +21,7 @@ from ..timeline.model import Clip, Timeline
 from .anchor import (AXIS_GROUP, AXIS_MEDIA, JOIN_TOL_US, ContentAnchor, RangeAnchor, clip_axis_in_us, clip_axis_out_us,
                      clip_unsupported, context_sig, media_id_of)
 from .registry import PRESENT, MediaRegistry
-from .timebase import offset_to_us, seconds_to_us, us_to_offset
+from .timebase import BIAS_US, US, seconds_to_us, us_to_offset
 
 NON_SUPPORTEE, PERDUE, FRAGMENTEE, MULTIPLE, HORS_PLAN, CONTEXTE, EXACTE = (
     "non_supportée", "perdue", "fragmentée", "multiple", "hors_plan", "contexte_modifié", "exacte")
@@ -159,7 +159,7 @@ class Resolver:
         flags = ("clips_non_supportés",) if k in self._unsupported else ()
         ax = self._idx.get(k)
         hits = ax.overlapping(a.us, a.us + 1, JOIN_TOL_US) if ax else []
-        cands = [t for t in hits if t[0] - JOIN_TOL_US <= a.us < t[1]]
+        cands = [t for t in hits if self._contains(t, a)]
         # jonction (coupe) : l'instant de la coupe appartient au plan de DROITE ; on écarte le plan de gauche contigu
         cands = [t for t in cands if not any(r[2].track == t[2].track and r[2].start == t[2].end
                                              and abs(t[1] - r[0]) <= JOIN_TOL_US for r in cands)]
@@ -177,6 +177,14 @@ class Resolver:
         if a.ctx and sig != a.ctx:
             return Resolution(a.id, CONTEXTE, opts, flags, "le voisinage du plan a changé", token=self.token)
         return Resolution(a.id, EXACTE, opts, flags, token=self.token)
+
+    def _contains(self, t, a) -> bool:
+        """L'instant `a` est-il dans le plan ? Axe media : comparaison entière EXACTE avec la fin rationnelle du plan (pas la fin arrondie)."""
+        lo, hi, c = t
+        if a.axis == AXIS_MEDIA:
+            d = a.us - lo + BIAS_US
+            return d >= 0 and d * self.tl.fps < c.duration * US
+        return lo - BIAS_US <= a.us < hi
 
     def _ctx(self, clip_id: str) -> str:
         return context_sig(self.tl, self.reg, self.tl.clip(clip_id))

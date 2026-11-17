@@ -2,12 +2,13 @@
 
 Un plan lit sa source à vitesse 1 : l'image `f` d'un plan commence à la microseconde source
     us(f) = src_in_us + rdiv((f − start)·10⁶, fps)        (fps = cadence ENTIÈRE de la timeline)
-et une microseconde source `a` tombe dans l'image `start + ⌊(a − src_in_us + ½)·fps / 10⁶⌋` (voir `us_to_offset`).
-L'aller-retour image → µs → image est exact pour toute cadence entière ≤ 1000 i/s (écart d'arrondi ≤ 0,5 µs ≪ une image)."""
+et une microseconde source `a` tombe dans l'image `start + ⌊(a − src_in_us + 1)·fps / 10⁶⌋` (voir `us_to_offset`).
+L'aller-retour image → µs → image est exact pour toute cadence entière ≤ 1000 i/s (écart d'arrondi ≤ 1 µs ≪ une image)."""
 
 from __future__ import annotations
 
 US = 1_000_000
+BIAS_US = 1      # absorbe l'arrondi cumulé : ancre (±½ µs) + `src_in` arrondi à 6 décimales (±½ µs) ≤ 1 µs
 
 
 def rdiv(n: int, d: int) -> int:
@@ -34,4 +35,4 @@ def offset_to_us(offset_frames: int, fps: int) -> int:
 
 def us_to_offset(delta_us: int, fps: int) -> int:
     """µs depuis l'entrée du plan → numéro d'image (plancher) ; le biais de ½ µs rend l'aller-retour exact avec `offset_to_us`."""
-    return ((2 * delta_us + 1) * fps) // (2 * US)
+    return ((delta_us + BIAS_US) * fps) // US
