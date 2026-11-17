@@ -15,7 +15,8 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
 from ..timeline.chutier import place_rush, place_subclip
-from ..timeline.editing import linked_ids, move_clips, razor, snap_frame, snap_move, snap_points, trim_edge, trim_limits
+from ..timeline.editing import (linked_ids, move_clips, razor, ripple_edge, ripple_limits, snap_frame, snap_move, snap_points,
+                                trim_edge, trim_limits)
 from ..timeline.model import Clip, Timeline, TimelineError
 from ..timeline.ops import execute
 from ..timeline.session import Session
@@ -74,6 +75,9 @@ class TimelineView(QWidget):
 
     def refresh_model(self) -> None:
         """À appeler après toute modification du modèle (le widget ne garde aucune copie des plans)."""
+        self._rev = getattr(self, "_rev", 0) + 1                      # invalide les validations de dépôt mises en cache
+        self._drop_cache = {}
+        self._snap_pts = None
         self.rows = L.Rows(self.tl)
         self.index = L.ClipIndex(self.tl)
         self.selection = [c for c in self.selection if any(k.id == c for k in self.tl.clips)]
@@ -255,7 +259,8 @@ class TimelineView(QWidget):
             except TimelineError as err:
                 self.rejected.emit(str(err))
                 return
-            self._trim = {"id": c.id, "edge": edge, "x0": x, "lo": lo, "hi": hi, "delta": 0, "active": False, "snapped": False}
+            self._trim = {"id": c.id, "edge": edge, "x0": x, "lo": lo, "hi": hi, "delta": 0, "active": False, "snapped": False,
+                          "ripple": False, "plain": (lo, hi), "rlim": None}
             return
         if zone == "body" and not c.locked:
             moving = set(linked_ids(self.tl, c.id))
@@ -268,7 +273,7 @@ class TimelineView(QWidget):
             self.set_playhead(round(self.vp.frame_of(x)))
             return
         if self._trim:
-            self._trim_move(x)
+            self._trim_move(x, bool(e.modifiers() & Qt.AltModifier))
             return
         d = self._drag
         if not d:
@@ -296,12 +301,21 @@ class TimelineView(QWidget):
         self.setCursor(Qt.SizeHorCursor if (c is not None and zone in ("left", "right") and not c.locked) else Qt.ArrowCursor)
 
     # --- rognage des bords ----------------------------------------------------------------------------------
-    def _trim_move(self, x: float) -> None:
+    def _trim_move(self, x: float, ripple: bool = False) -> None:
         t = self._trim
         if not t["active"] and abs(x - t["x0"]) < 3:
             return
         t["active"] = True
         c = self.tl.clip(t["id"])
+        if ripple != t["ripple"]:                              # Alt enfoncé/relâché en cours de geste : on change de jeu de limites
+            t["ripple"] = ripple
+            if ripple and t["rlim"] is None:
+                try:
+                    t["rlim"] = ripple_limits(self.tl, t["id"], t["edge"], True, self.source_len)
+                except TimelineError as err:
+                    self.rejected.emit(str(err))
+                    t["ripple"] = False
+            t["lo"], t["hi"] = t["rlim"] if t["ripple"] else t["plain"]
         edge_frame = c.start if t["edge"] == "head" else c.end
         raw = edge_frame + round((x - t["x0"]) / self.vp.zoom)
         pts = snap_points(self.tl, exclude=set(linked_ids(self.tl, c.id)), playhead=self.playhead)
@@ -309,14 +323,27 @@ class TimelineView(QWidget):
         t["snapped"] = snapped != raw
         t["delta"] = max(t["lo"], min(t["hi"], snapped - edge_frame))   # la prévisualisation ne sort jamais des limites permises
         t["clamped"] = (snapped - edge_frame) != t["delta"]
+        if t["ripple"] and t["delta"]:                         # validation par le moteur (essai sur copie, une fois par valeur de delta)
+            if t.get("checked") != t["delta"]:
+                t["checked"] = t["delta"]
+                try:
+                    execute(self.tl.copy(), ripple_edge(self.tl, t["id"], t["edge"], t["delta"], True, self.source_len))
+                    t["engine_error"] = None
+                except TimelineError as err:
+                    t["engine_error"] = str(err)
+        else:
+            t["engine_error"] = None
         self.update()
 
     def _trim_finish(self) -> None:
         t, self._trim = self._trim, None
         if t and t["active"] and t["delta"] != 0:
             try:
-                tx = trim_edge(self.tl, t["id"], t["edge"], t["delta"], True, self.source_len)
-                self.session.do(tx, tx.label)
+                if t["ripple"]:
+                    tx = ripple_edge(self.tl, t["id"], t["edge"], t["delta"], True, self.source_len)
+                else:
+                    tx = trim_edge(self.tl, t["id"], t["edge"], t["delta"], True, self.source_len)
+                self.session.do(tx, tx.label)           # le moteur revalide à l'application (Session.do est atomique)
                 self.refresh_model()
                 self.edited.emit(tx.label)
             except TimelineError as err:
@@ -335,11 +362,22 @@ class TimelineView(QWidget):
             edge_x = self.vp.x_of(start if t["edge"] == "head" else end)
             p.setPen(QPen(QColor("#ff9f1c") if t.get("clamped") else QColor("#ffd24a"), 2))
             p.drawLine(int(edge_x), y, int(edge_x), y + h)
+        if t["ripple"]:
+            shift = t["delta"] if t["edge"] == "tail" else -t["delta"]
+            for cid in linked_ids(self.tl, t["id"]):
+                c0 = self.tl.clip(cid)
+                y, h = self.rows.y.get(c0.track, 0), self.rows.height(c0.track)
+                for f in self.index.visible(c0.track, c0.end, max(c0.end, self.vp.last_frame - shift)):
+                    if f.start >= c0.end and f.id not in linked_ids(self.tl, t["id"]):
+                        p.fillRect(QRectF(self.vp.x_of(f.start + shift), y + 1, f.duration * self.vp.zoom - 1, h - 2), QColor(255, 159, 28, 60))
         c = self.tl.clip(t["id"])
         p.setPen(QColor("#e8eaed"))
-        txt = f"{t['delta']:+d} i  ·  {L.timecode((c.start + t['delta']) if t['edge'] == 'head' else (c.end + t['delta']), self.tl.fps)}"
+        txt = f"{'RIPPLE ' if t['ripple'] else ''}{t['delta']:+d} i  ·  {L.timecode((c.start + t['delta']) if t['edge'] == 'head' else (c.end + t['delta']), self.tl.fps)}"
         if t.get("clamped"):
             txt += "  (limite)"
+        if t.get("engine_error"):
+            p.setPen(QColor("#ff6b6b"))
+            txt += f"  ✗ {t['engine_error']}"
         p.drawText(int(self.vp.x_of(c.start if t["edge"] == "head" else c.end)) + 6, self.rows.y.get(c.track, 0) + 14, txt)
 
     def mouseReleaseEvent(self, e):
@@ -362,15 +400,33 @@ class TimelineView(QWidget):
         self.update()
 
     # --- dépôt depuis le chutier -----------------------------------------------------------------------------
-    def plan_drop(self, payload: dict, x: float, y: float, ctrl: bool = False):
+    def _snap_points(self) -> list[int]:
+        if self._snap_pts is None:
+            self._snap_pts = snap_points(self.tl)                     # sans tête de lecture : elle bouge sans changer le modèle
+        return self._snap_pts
+
+    def _snap_drop(self, frame: int, thr: int) -> int:
+        """Aimante sur les bords/repères/tête de lecture par dichotomie (O(log n)) au lieu de balayer tous les points à chaque souris."""
+        from bisect import bisect_left
+        pts = self._snap_points()
+        i = bisect_left(pts, frame)
+        cands = [p for p in (pts[i - 1] if i > 0 else None, pts[i] if i < len(pts) else None, self.playhead, 0) if p is not None]
+        best = min(cands, key=lambda p: (abs(p - frame), p))
+        return best if abs(best - frame) <= thr else frame
+
+    def plan_drop(self, payload: dict, x: float, y: float, ctrl: bool = False, exact: bool = False):
         """Évalue un dépôt SANS rien modifier : renvoie un dict {ok, reason, track, start, frames, mode, tx}.
-        La validité vient du moteur lui-même (essai sur une copie) : pistes verrouillées, type de piste, chevauchements, ripple."""
+        La validité vient du moteur (essai de la transaction) : pistes verrouillées, type de piste, chevauchements, ripple.
+        Aperçu (`exact=False`) : essai sur une copie LIMITÉE aux pistes concernées (`scoped_copy`) et résultat mis en cache par
+        (charge, piste, image, mode) tant que le modèle ne change pas. Dépôt (`exact=True`) : jamais de cache, essai sur la copie COMPLÈTE,
+        puis `Session.do` revalide encore à l'application."""
         mode = {"overwrite": "insert", "insert": "overwrite"}[self.drop_mode] if ctrl else self.drop_mode
         tid = self.rows.track_at(y)
         res = {"ok": False, "reason": "", "track": tid, "start": 0, "frames": 1, "mode": mode, "tx": None, "audio_track": None}
         if tid is None:
             res["reason"] = "dépose sur une piste"
             return res
+        ckey = None
         try:
             if "sub" in payload:
                 b = self.tl.subclip(payload["sub"])
@@ -379,8 +435,13 @@ class TimelineView(QWidget):
                 length, kind = float(payload["length"]), payload.get("kind", "video")
             frames = max(1, round(length * self.tl.fps))
             raw = max(0, round(self.vp.frame_of(x)))
-            start = snap_frame(raw, snap_points(self.tl, playhead=self.playhead), max(1, round(SNAP_PX / self.vp.zoom)))
+            start = self._snap_drop(raw, max(1, round(SNAP_PX / self.vp.zoom)))
             res.update(start=max(0, start), frames=frames)
+            ckey = (payload.get("sub") or (payload.get("media"), payload.get("length"), payload.get("src_in")), tid, res["start"], mode,
+                    self.drop_with_audio, self._rev)
+            if not exact and ckey in self._drop_cache:
+                self.stats["drop_cache_hits"] = self.stats.get("drop_cache_hits", 0) + 1
+                return {**self._drop_cache[ckey]}
             if self.tl.track(tid).locked:
                 raise TimelineError(f"la piste {tid} est verrouillée")
             if self.tl.track(tid).kind != kind:
@@ -394,10 +455,15 @@ class TimelineView(QWidget):
             else:
                 tx = place_rush(self.tl, payload["media"], length, tid, res["start"], float(payload.get("src_in", 0.0)), mode,
                                 audio_track, None, kind, payload.get("name", ""), self.source_len(payload["media"]))
-            execute(self.tl.copy(), tx)                     # essai complet sur une copie : le modèle réel n'est jamais touché
+            trial = self.tl.copy() if exact else self.tl.scoped_copy([tid] + ([audio_track] if audio_track else []))
+            execute(trial, tx)                              # le modèle réel n'est jamais touché
             res.update(ok=True, tx=tx)
         except TimelineError as err:
             res["reason"] = str(err)
+        if not exact and ckey is not None:
+            if len(self._drop_cache) > 256:
+                self._drop_cache.clear()
+            self._drop_cache[ckey] = {**res}
         return res
 
     def dragEnterEvent(self, e):
@@ -425,7 +491,7 @@ class TimelineView(QWidget):
     def dropEvent(self, e):
         pl = dnd.decode(e.mimeData())
         pos = e.position()
-        plan = self.plan_drop(pl, pos.x(), pos.y(), bool(e.modifiers() & Qt.ControlModifier)) if pl else None
+        plan = self.plan_drop(pl, pos.x(), pos.y(), bool(e.modifiers() & Qt.ControlModifier), exact=True) if pl else None
         self._drop = None
         self._drop_payload = None
         self.update()

@@ -89,3 +89,32 @@ def test_group_clips_have_no_source_length_check_but_keep_neighbour_rule():
     tl = tl3()
     tl.clip("c").group = "g"   # un plan multicam ne dépend pas de la durée d'un seul rush
     assert trim_limits(tl, "c", "tail", False, lambda m: 1.0)[1] > 1000
+
+
+# --- ripple (Alt + glisser) ------------------------------------------------------------------------------------
+from kolnoa_editor.timeline import ripple_edge, ripple_limits
+
+
+def test_ripple_tail_pushes_the_rest_and_head_pulls_it_back():
+    tl = tl3()
+    lo, hi = ripple_limits(tl, "b", "tail", False, LEN)
+    assert lo == -49 and hi == int((30.0 - 10.0) * FPS) - 50              # pas de limite de voisin : la suite est poussée
+    execute(tl, ripple_edge(tl, "b", "tail", 40, False, LEN))             # b rallonge de 40 i : c (260) part à 300
+    assert (tl.clip("b").end, tl.clip("c").start) == (240, 300)
+    execute(tl, ripple_edge(tl, "c", "head", 10, False, LEN))             # c raccourcit de 10 i au début : il garde sa place, sa fin avance
+    assert (tl.clip("c").start, tl.clip("c").duration, tl.clip("c").src_in) == (300, 40, 5.4)
+
+
+def test_ripple_refusals_and_linked_clips():
+    tl = tl3()
+    snap = tl.to_dict()
+    for cid, edge, d in (("c", "tail", -50), ("a", "head", 50), ("c", "tail", 10 ** 6), ("c", "head", -(10 * FPS))):
+        with pytest.raises(TimelineError):
+            ripple_edge(tl, cid, edge, d, False, LEN)
+    assert tl.to_dict() == snap
+    execute(tl, ripple_edge(tl, "a", "tail", -10, True, LEN))             # a et son son lié raccourcissent ensemble ; la suite recule
+    assert tl.clip("a").duration == tl.clip("s").duration == 40
+    assert tl.clip("b").start == 140
+    tl.clip("c").locked = True
+    with pytest.raises(LockedError):
+        ripple_limits(tl, "c", "tail")

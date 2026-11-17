@@ -350,6 +350,44 @@ def trim_edge(tl: Timeline, clip_id: str, edge: str, delta: int, linked: bool = 
     return Transaction(ops, f"rognage {clip_id} : bord {edge} {delta:+d} i")
 
 
+def ripple_limits(tl: Timeline, clip_id: str, edge: str, linked: bool = True,
+                  source_len: Callable[[str], float | None] | None = None) -> tuple[int, int]:
+    """Plage `(mini, maxi)` du déplacement `d` d'un bord en mode RIPPLE (la suite de la piste suit) : d > 0 = le bord va vers la droite
+    (fin : rallonge et pousse la suite ; début : raccourcit, le plan garde sa place et la suite recule). Pas de limite de voisin
+    (la suite se décale) ; restent : durée ≥ 1 image + fondus, poignées du rush, plans liés (intersection), verrous (`LockedError`)."""
+    if edge not in ("head", "tail"):
+        raise TimelineError("bord 'head' ou 'tail' attendu")
+    lo, hi = -(10 ** 9), 10 ** 9
+    for cid in (linked_ids(tl, clip_id) if linked else [clip_id]):
+        c = tl.clip(cid)
+        if c.locked or tl.track(c.track).locked:
+            raise LockedError(f"{c.id} est verrouillé")
+        min_dur = max(1, math.ceil((c.fade_in + c.fade_out) * tl.fps - 1e-9))
+        if edge == "tail":
+            a, b = min_dur - c.duration, 10 ** 9
+            total = source_len(c.media) if (source_len is not None and not c.group) else None
+            if total is not None:
+                b = int((total - c.src_in) * tl.fps + 1e-6) - c.duration
+        else:
+            a, b = -round(c.src_in * tl.fps + 1e-9), c.duration - min_dur
+        lo, hi = max(lo, a), min(hi, b)
+    return lo, hi
+
+
+def ripple_edge(tl: Timeline, clip_id: str, edge: str, d: int, linked: bool = True,
+                source_len: Callable[[str], float | None] | None = None) -> Transaction:
+    """Ripple à la souris : même convention que `trim_edge` (d > 0 = bord vers la droite), vérifiée par `ripple_limits`, puis
+    exécutée par `ripple_trim` (qui décale la suite). Refus hors limites ; une seule transaction."""
+    if d == 0:
+        raise TimelineError("delta nul")
+    lo, hi = ripple_limits(tl, clip_id, edge, linked, source_len)
+    if not lo <= d <= hi:
+        raise TimelineError(f"{clip_id}: ripple de {d:+d} i impossible (permis : de {lo:+d} à {hi:+d} i)")
+    delta = d if edge == "head" else -d            # ripple_trim : delta > 0 raccourcit
+    tx = ripple_trim(tl, clip_id, edge, delta, linked, source_len)
+    return Transaction(tx.ops, f"ripple {clip_id} : bord {edge} {d:+d} i")
+
+
 # --- aimantation (magnétisme) ---------------------------------------------------------------------
 def snap_points(tl: Timeline, exclude: set[str] | None = None, playhead: int | None = None,
                 tracks: list[str] | None = None) -> list[int]:
