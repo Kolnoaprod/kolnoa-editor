@@ -26,10 +26,10 @@ MEDIA = {"A7": info("a7"), "OSMO": info("osmo", fps=25), "DRONE": info("drone", 
 to_angle = lambda a, t: t - {"A7": 12.0, "OSMO": 3.0, "DRONE": 0.0}[a]
 
 
-def make(speed_err=None, seek_s=0.15, **kw):
+def make(speed_err=None, seek_s=0.15, lag=False, **kw):
     ft = FakeTime()
     speed_err = speed_err or {}
-    mk = lambda a: FakeBackend(ft, seek_s=seek_s, speed_err=speed_err.get(a, 0.0))
+    mk = lambda a: FakeBackend(ft, seek_s=seek_s, speed_err=speed_err.get(a, 0.0), lag=lag)
     tl = tl_cam()
     p = MulticamPlayer(tl, "g001", "V1", MEDIA, mk, MasterClock(ft), now=ft, **kw)
     return p, ft, tl
@@ -208,3 +208,77 @@ def test_no_recording_when_paused_press_only_changes_view():
     p.seek(5.0); run(p, ft, 0.5)
     p.press(2); run(p, ft, 0.5)
     assert p.shown == "OSMO" and p.take == []
+
+
+# --- PR #19 revue : rafraîchissement en pause, seeks successifs, cadence réelle vs média, budget ----------------
+def positions_ok(p, tol=0.06):
+    t = p.clock.position()
+    return {a: abs(be.position() - p.t_angle(a, t)) for a, be in p.backends.items() if a in p._open} and \
+        max(abs(be.position() - p.t_angle(a, t)) for a, be in p.backends.items() if a in p._open) < tol
+
+
+def test_successive_seeks_while_paused_converge_on_the_last_one_without_seek_storm():
+    p, ft, _ = make(seek_s=0.3, lag=True)                      # seeks asynchrones : la position n'arrive que 0,3 s plus tard
+    p.seek(20.0); run(p, ft, 1.0)
+    for t in (30.0, 45.0, 60.0):                               # trois seeks à 30 ms d'intervalle
+        p.seek(t); run(p, ft, 0.03)
+    n0 = p.stats.seeks_issued
+    run(p, ft, 1.5)
+    assert p.clock.position() == pytest.approx(60.0)
+    assert positions_ok(p)                                     # tous les angles ouverts sont sur la DERNIÈRE cible, aucun sur une cible périmée
+    assert p.stats.seeks_issued - n0 <= 2 * len(p._open)       # pas de rafale : au plus une reprise par angle après les 3 seeks
+    for a, be in p.backends.items():
+        if a in p._open:
+            assert be._landing is None
+
+
+def test_paused_angle_that_lands_wrong_is_refreshed_once_not_every_tick():
+    p, ft, _ = make(seek_s=0.3, lag=True)
+    p.seek(30.0); run(p, ft, 1.0)
+    be = p.backends["OSMO"]
+    be.seek(5.0)                                               # le décodeur de l'angle est ailleurs (seek raté / ancien)
+    run(p, ft, 0.25)                                           # le seek parasite n'a pas encore atterri
+    n_before = sum(1 for e in be.log if e[0] == "seek")
+    run(p, ft, 2.0)
+    n_after = sum(1 for e in be.log if e[0] == "seek")
+    assert abs(be.position() - to_angle("OSMO", 30.0)) < 0.06  # recalé
+    assert n_after - n_before <= 2                             # 1 correction (+1 de marge), pas une par image (30 Hz)
+
+
+def test_refresh_cadence_is_wall_clock_not_media_time():
+    for rate in (1.0, 4.0):
+        p, ft, _ = make(budget=1.0)                            # budget minuscule : OSMO et DRONE sont « en pause »
+        p.seek(30.0); run(p, ft, 0.5)
+        p.clock.play(rate); p._dirty = True
+        run(p, ft, 0.2)
+        assert p.backends["OSMO"].path is not None and any(s.role == "paused" for s in p.slots)
+        n0 = sum(1 for e in p.backends["OSMO"].log if e[0] == "seek")
+        run(p, ft, 4.0)                                        # 4 s RÉELLES
+        n = sum(1 for e in p.backends["OSMO"].log if e[0] == "seek") - n0
+        assert 5 <= n <= 9, (rate, n)                          # ~ une reprise toutes les 0,5 s réelles, quelle que soit la vitesse (pas ×rate)
+
+
+def mi(name, proxy=True, w=3840, h=2160, fps=50):
+    return info(name, w, h, fps, proxy)
+
+
+def test_planner_reports_missing_proxy_and_budget_overrun_never_silently():
+    media = {"A7": mi("a7", proxy=False), "OSMO": mi("osmo", proxy=False, fps=25), "DRONE": mi("drone")}
+    budget = 2.0 * media["DRONE"].proxy_cost                   # ~ 2 proxys 540p, mais PAS une source 4K50
+    pl = plan(media, "A7", to_angle, 20.0, budget=budget, hw_decode=True)
+    assert isinstance(pl, list) and len(pl) == 3               # reste utilisable comme une liste de Slot
+    assert pl.over_budget and pl.spent > pl.budget             # l'actif sans proxy dépasse : c'est dit
+    assert any("A7" in w and "pas de proxy" in w for w in pl.warnings)
+    assert "A7" in pl.missing_proxy and "OSMO" in pl.missing_proxy
+    osmo = next(x for x in pl if x.angle == "OSMO")
+    assert osmo.role == PAUSED and any("OSMO" in w for w in pl.warnings)      # non actif sans proxy ni budget : en pause, pas lu en 4K
+    ok = plan(MEDIA, "A7", to_angle, 20.0, budget=1e10)
+    assert not ok.over_budget and ok.warnings == () and ok.missing_proxy == ()
+
+
+def test_controller_exposes_planner_warnings_and_counts_overruns():
+    media = {"A7": mi("a7", proxy=False), "OSMO": mi("osmo"), "DRONE": mi("drone")}
+    ft = FakeTime()
+    p = MulticamPlayer(tl_cam(), "g001", "V1", media, lambda a: FakeBackend(ft), MasterClock(ft), now=ft, budget=1e7)
+    p.seek(30.0)
+    assert p.warnings and p.stats.over_budget_replans >= 1 and p.report.over_budget
