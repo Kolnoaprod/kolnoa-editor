@@ -10,3 +10,13 @@ venv/
 *.mp4
 *.mov
 *.wav
+
+# fichiers de session et exports de tournage réels : JAMAIS dans le dépôt public (fixtures auditées : tests/data/anonymized/)
+base.json
+history.jsonl
+current.json
+library.json
+snapshots/
+anonymized_*.json
+*.part
+!tests/data/anonymized/*.json

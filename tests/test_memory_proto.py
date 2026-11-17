@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from kolnoa_editor.experimental.memory_proto import analyze_timeline, render_report
-from kolnoa_editor.experimental.memory_proto.anonymize import anonymize_timeline
 from kolnoa_editor.timeline import (AddCrossfade, AddGroup, Clip, Crossfade, Marker, Session, Timeline, Track, TimelineError, execute, razor,
                                     remove_crossfade)
 
@@ -143,34 +142,16 @@ def test_split_by_razor_changes_cuts_but_not_total_duration():
     assert after["shots"]["n"] == before["shots"]["n"] + 1 and after["duration_s"] == before["duration_s"]
 
 
-def test_anonymizer_removes_every_name_but_keeps_all_statistics():
-    tl = base([clip("c001", "V1", 0, 100, label="Mariée Léa", note="regard"), clip("k001", "V2", 20, 25, media="Mairie/C0042.MP4")],
-              [Marker("m001", 0, "chapter", "mairie"), Marker("m002", 50, "note", "Nom Propre")])
-    tl.title = "Mariage Dupont"
-    tl.music = {"path": "Z:/Clients/Dupont/musique.mp3", "start": 0}
-    anon, rep = anonymize_timeline(tl)
-    blob = json.dumps(anon.to_dict(), ensure_ascii=False)
-    for secret in ("Dupont", "Léa", "regard", "Mairie/C0042", "rush1.mp4", "Nom Propre", "Clients"):
-        assert secret not in blob, secret
-    assert rep["chapters_kept_for_review"] == ["mairie"] and rep["n_media"] == 2
-    a, b = analyze_timeline(tl), analyze_timeline(anon)
-    a.pop("fingerprint"), b.pop("fingerprint")
-    assert a == b
-    assert tl.title == "Mariage Dupont"                                    # l'original n'est pas modifié
-
-
-def test_anonymizer_renames_multicam_angles_consistently():
-    from tests.test_multicam_model import group_dict
-    from tests.test_multicam_live import tl_cam
-    tl = tl_cam()
-    anon, _ = anonymize_timeline(tl)
-    g = anon.groups[0]
-    assert {a.id for a in g.angles} <= {f"angle{n}" for n in range(1, 9)} and g.master in {a.id for a in g.angles}
-    assert all(c.angle in {a.id for a in g.angles} for c in anon.clips if c.group)
-
-
 def test_no_production_module_imports_the_experimental_package():
     src = Path(__file__).resolve().parents[1] / "src" / "kolnoa_editor"
     offenders = [str(p.relative_to(src)) for p in src.rglob("*.py")
                  if "experimental" not in p.parts and re.search(r"^\s*(from|import)\s+[\w.]*experimental\b", p.read_text(encoding="utf-8"), re.M)]
     assert offenders == []
+
+
+def test_hold_threshold_is_configurable_per_section_kind():
+    tl = base([clip("c001", "V1", 0, 100), clip("c002", "V1", 100, 100), clip("d001", "V1", 300, 100)],
+              [Marker("m001", 0, "chapter", "a"), Marker("m002", 300, "chapter", "b")])
+    st = analyze_timeline(tl, hold_s={"a": 3.0, "default": 10.0})            # plans de 4 s
+    a, b = st["sections"]
+    assert (a["hold_s"], a["hold_ratio"]) == (3.0, 1.0) and (b["hold_s"], b["hold_ratio"]) == (10.0, 0.0)

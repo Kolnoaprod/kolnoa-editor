@@ -50,8 +50,10 @@ def _fingerprint(tl: Timeline) -> str:
     return hashlib.sha1(json.dumps(tl.to_dict(), sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
-def analyze_timeline(tl: Timeline, hold_s: float = 6.0) -> dict[str, Any]:
-    """Statistiques de montage de `tl` (non modifiée). `hold_s` : seuil explicite d'un plan « qui respire »."""
+def analyze_timeline(tl: Timeline, hold_s: float | dict[str, float] = 6.0) -> dict[str, Any]:
+    """Statistiques de montage de `tl` (non modifiée). `hold_s` : seuil explicite d'un plan « qui respire » — un nombre, ou un
+    dictionnaire {type de section: seuil} (clé `default` pour les autres) : ce n'est pas une vérité stylistique."""
+    default_hold = hold_s.get("default", 6.0) if isinstance(hold_s, dict) else float(hold_s)
     fps = tl.fps
     warnings: list[str] = []
     main_ids = {t.id for t in tl.tracks if t.kind == "video" and t.role == "main"}
@@ -84,7 +86,8 @@ def analyze_timeline(tl: Timeline, hold_s: float = 6.0) -> dict[str, Any]:
         switches = sum(1 for a, b in zip(sh, sh[1:])
                        if a.group and a.group == b.group and a.angle != b.angle and a.end == b.start)
         total = sum(durations)
-        held = sum(d for d in durations if d >= hold_s)
+        hold = hold_s.get(kind, default_hold) if isinstance(hold_s, dict) else default_hold
+        held = sum(d for d in durations if d >= hold)
         xfs = [xf_by_left[c.id].duration for c in sh if c.id in xf_by_left]
         sections.append({
             "kind": kind, "start": s0, "end": s1, "duration_s": round(dur_s, 3),
@@ -92,7 +95,7 @@ def analyze_timeline(tl: Timeline, hold_s: float = 6.0) -> dict[str, Any]:
             "cuts_per_min": round(len(sh) / minutes, 3) if minutes else None,
             "angle_switches": switches,
             "angle_switches_per_min": round(switches / minutes, 3) if minutes else None,
-            "hold_ratio": round(held / total, 4) if total else None,
+            "hold_ratio": round(held / total, 4) if total else None, "hold_s": hold,
             "cutaways": {"n": len(cu), "per_min": round(len(cu) / minutes, 3) if minutes else None,
                          "durations_s": _quantiles([c.duration / fps for c in cu])},
             "crossfades_audio": {"n": len(xfs), "durations_s": _quantiles(xfs)},
