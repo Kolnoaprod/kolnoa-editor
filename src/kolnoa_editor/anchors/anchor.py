@@ -115,21 +115,27 @@ def key_for(tl: Timeline, reg: MediaRegistry, c: Clip, axis: str) -> str:
     return mid
 
 
-def context_sig(tl: Timeline, reg: MediaRegistry, c: Clip) -> str:
-    """Empreinte du voisinage : média/angle du premier plan VOISIN DIFFÉRENT de chaque côté sur la piste (sans chemin ni nom).
-    Les morceaux d'un même plan coupé au rasoir ne changent donc pas le contexte ; une autre prise voisine, si."""
-    me = (media_id_of(reg, c.media) or "?", c.group or "", c.angle or "")
-    same = sorted((x for x in tl.clips if x.track == c.track), key=lambda x: (x.start, x.id))
-    i = same.index(c)
+def clip_sig(reg: MediaRegistry, c: Clip) -> tuple:
+    return (media_id_of(reg, c.media) or "?", c.group or "", c.angle or "")
 
-    def first_other(seq):
-        for x in seq:
-            sig = (media_id_of(reg, x.media) or "?", x.group or "", x.angle or "")
-            if sig != me:
-                return sig
-        return None
-    side = (first_other(reversed(same[:i])), first_other(same[i + 1:]))
-    return hashlib.sha1(repr(side).encode()).hexdigest()[:12]
+
+def ctx_hash(left, right) -> str:
+    return hashlib.sha1(repr((left, right)).encode()).hexdigest()[:12]
+
+
+def ctx_from_sigs(sigs: list[tuple], i: int) -> str:
+    """Empreinte du voisinage du plan n° `i` d'une piste (signatures triées par position) : le premier voisin DIFFÉRENT de chaque côté.
+    Les morceaux d'un même plan coupé au rasoir ne changent donc pas le contexte ; une autre prise voisine, si."""
+    me = sigs[i]
+    left = next((sigs[j] for j in range(i - 1, -1, -1) if sigs[j] != me), None)
+    right = next((sigs[j] for j in range(i + 1, len(sigs)) if sigs[j] != me), None)
+    return ctx_hash(left, right)
+
+
+def context_sig(tl: Timeline, reg: MediaRegistry, c: Clip) -> str:
+    """Voisinage d'un plan (sans chemin ni nom). Version simple, utilisée à la CRÉATION d'une ancre."""
+    same = sorted((x for x in tl.clips if x.track == c.track), key=lambda x: (x.start, x.id))
+    return ctx_from_sigs([clip_sig(reg, x) for x in same], same.index(c))
 
 
 def _clip_at(tl: Timeline, track: str, frame: int) -> Clip:

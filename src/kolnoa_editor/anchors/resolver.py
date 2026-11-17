@@ -19,7 +19,7 @@ from itertools import accumulate
 
 from ..timeline.model import Clip, Timeline
 from .anchor import (AXIS_GROUP, AXIS_MEDIA, JOIN_TOL_US, ContentAnchor, RangeAnchor, clip_axis_in_us, clip_axis_out_us,
-                     clip_unsupported, context_sig, media_id_of)
+                     clip_sig, clip_unsupported, ctx_from_sigs, media_id_of)
 from .registry import PRESENT, MediaRegistry
 from .timebase import BIAS_US, US, seconds_to_us, us_to_end_offset, us_to_offset
 
@@ -112,6 +112,16 @@ class Resolver:
                 buckets.setdefault(k, []).append((clip_axis_in_us(tl, c, k[0]), clip_axis_out_us(tl, c, k[0]), c))
         for k, items in buckets.items():
             self._idx[k] = _Axis(items)
+        self._by_id = {c.id: c for c in tl.clips}
+        by_track: dict[str, list[Clip]] = {}
+        for c in tl.clips:
+            by_track.setdefault(c.track, []).append(c)
+        self._track_sigs, self._track_pos = {}, {}
+        for t, cl in by_track.items():
+            cl.sort(key=lambda x: (x.start, x.id))
+            self._track_sigs[t] = [clip_sig(reg, x) for x in cl]
+            for i, x in enumerate(cl):
+                self._track_pos[x.id] = i
         self.token = timeline_token(tl, reg)
 
     def is_fresh(self) -> bool:
@@ -187,7 +197,7 @@ class Resolver:
         return lo - BIAS_US <= a.us < hi
 
     def _ctx(self, clip_id: str) -> str:
-        return context_sig(self.tl, self.reg, self.tl.clip(clip_id))
+        return ctx_from_sigs(self._track_sigs[self._by_id[clip_id].track], self._track_pos[clip_id])
 
     def _nearest(self, a, ax) -> Nearest | None:
         if not ax or not ax.items:
