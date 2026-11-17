@@ -118,7 +118,7 @@ def test_paint_draws_only_visible_clips_within_budget(view):
         view.grab()
     zoom_ms = (time.perf_counter() - t) * 100
     print(f"[perf] zoom : {zoom_ms:.1f} ms par image")
-    assert pan_ms < 120 and zoom_ms < 200
+    assert pan_ms < 40 and zoom_ms < 60          # mesuré : ~5 et ~17 ms ; le zoom continu est surveillé (régression > ×3)
 
 
 def test_drag_moves_one_clip_in_a_single_undo_step(view):
