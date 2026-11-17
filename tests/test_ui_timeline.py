@@ -185,3 +185,62 @@ def test_locked_clip_is_not_draggable(view):
     QTest.mouseMove(view, QPoint(x0 + 80, y))
     QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(x0 + 80, y))
     assert view.tl.to_dict() == snapshot
+
+
+def _trim_setup(view):
+    tl = view.tl
+    c = next(k for k in tl.clips if k.track == "V1" and k.start > 0)
+    nxt = min((k.start for k in tl.clips if k.track == "V1" and k.start >= c.end), default=None)
+    return tl, c, nxt, view.rows.y["V1"] + 10
+
+
+def test_trim_tail_drag_previews_clamps_and_is_one_undo_step(view):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    tl, c, nxt, y = _trim_setup(view)
+    xr = int(view.vp.x_of(c.end)) - 2
+    gap, dur0 = nxt - c.end, c.duration
+    QTest.mousePress(view, Qt.LeftButton, Qt.NoModifier, QPoint(xr, y))
+    QTest.mouseMove(view, QPoint(xr + 3, y))
+    QTest.mouseMove(view, QPoint(xr + int((gap + 40) * view.vp.zoom), y))        # on tire BIEN au-delà du voisin
+    assert view._trim["delta"] == gap and view._trim["clamped"]                 # la prévisualisation s'arrête à la limite
+    assert tl.clip(c.id).duration == dur0                                        # rien d'écrit pendant le glisser
+    QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(xr + int((gap + 40) * view.vp.zoom), y))
+    assert tl.clip(c.id).duration == dur0 + gap
+    view.session.undo()
+    assert tl.clip(c.id).duration == dur0
+
+
+def test_trim_head_updates_source_in_and_escape_cancels(view):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    tl, c, nxt, y = _trim_setup(view)
+    xl = int(view.vp.x_of(c.start)) + 2
+    src0, start0, end0, snap = c.src_in, c.start, c.end, tl.to_dict()
+    QTest.mousePress(view, Qt.LeftButton, Qt.NoModifier, QPoint(xl, y))
+    QTest.mouseMove(view, QPoint(xl + 3, y))
+    QTest.mouseMove(view, QPoint(xl + int(10 * view.vp.zoom) + 3, y))
+    assert view._trim["delta"] > 0
+    QTest.keyClick(view, Qt.Key_Escape)
+    QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(xl + 40, y))
+    assert tl.to_dict() == snap                                                  # Échap : rien n'a été écrit
+    QTest.mousePress(view, Qt.LeftButton, Qt.NoModifier, QPoint(xl, y))
+    QTest.mouseMove(view, QPoint(xl + 3, y))
+    QTest.mouseMove(view, QPoint(xl + int(10 * view.vp.zoom) + 3, y))
+    QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(xl + int(10 * view.vp.zoom) + 3, y))
+    n = tl.clip(c.id)
+    assert n.start > start0 and n.src_in == pytest.approx(src0 + (n.start - start0) / FPS)
+    assert n.end == end0                                                        # la fin ne bouge pas
+
+
+def test_trim_respects_source_length(view):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    tl, c, nxt, y = _trim_setup(view)
+    view.source_len = lambda media: c.src_in + c.duration / FPS + 0.2           # 0,2 s = 5 images de poignée après le plan
+    xr = int(view.vp.x_of(c.end)) - 2
+    QTest.mousePress(view, Qt.LeftButton, Qt.NoModifier, QPoint(xr, y))
+    QTest.mouseMove(view, QPoint(xr + 3, y))
+    QTest.mouseMove(view, QPoint(xr + int(30 * view.vp.zoom), y))
+    assert view._trim["hi"] == 5 and view._trim["delta"] <= 5
+    QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(xr + int(30 * view.vp.zoom), y))

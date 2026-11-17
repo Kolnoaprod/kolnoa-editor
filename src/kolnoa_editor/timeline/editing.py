@@ -12,6 +12,7 @@ Règles communes :
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict
 from typing import Callable
 
@@ -298,6 +299,55 @@ def roll_trim(tl: Timeline, left_id: str, right_id: str, delta: int,
     return Transaction([TrimClip(l.id, l.start, l.duration + delta, l.src_in),
                         TrimClip(r.id, r.start + delta, r.duration - delta, new_src)],
                        f"coupe {l.id}|{r.id} déplacée de {delta:+d} i")
+
+
+# --- rognage simple d'un bord (sans décaler la suite) -------------------------------------------------
+def trim_limits(tl: Timeline, clip_id: str, edge: str, linked: bool = True,
+                source_len: Callable[[str], float | None] | None = None) -> tuple[int, int]:
+    """Plage `(mini, maxi)` de `delta` (en images) permise pour déplacer un bord : delta > 0 = le bord va vers la DROITE
+    (début : raccourcit ; fin : rallonge), delta < 0 = vers la gauche. Tient compte de : durée ≥ 1 image (et des fondus),
+    plan voisin de la piste (jamais de chevauchement), début du film, poignées du média source, plans liés (intersection).
+    Plan ou piste verrouillé : `LockedError`."""
+    if edge not in ("head", "tail"):
+        raise TimelineError("bord 'head' ou 'tail' attendu")
+    lo, hi = -(10 ** 9), 10 ** 9
+    for cid in (linked_ids(tl, clip_id) if linked else [clip_id]):
+        c = tl.clip(cid)
+        if c.locked or tl.track(c.track).locked:
+            raise LockedError(f"{c.id} est verrouillé")
+        min_dur = max(1, math.ceil((c.fade_in + c.fade_out) * tl.fps - 1e-9))
+        others = [x for x in tl.clips_on(c.track) if x.id != c.id]
+        if edge == "head":
+            prev_end = max((x.end for x in others if x.end <= c.start), default=0)
+            a, b = prev_end - c.start, c.duration - min_dur
+            a = max(a, -round(c.src_in * tl.fps + 1e-9))                       # pas avant le début du rush
+        else:
+            nxt = min((x.start for x in others if x.start >= c.end), default=None)
+            a, b = min_dur - c.duration, (nxt - c.end) if nxt is not None else 10 ** 9
+            total = source_len(c.media) if (source_len is not None and not c.group) else None
+            if total is not None:
+                b = min(b, int((total - c.src_in) * tl.fps + 1e-6) - c.duration)
+        lo, hi = max(lo, a), min(hi, b)
+    return lo, hi
+
+
+def trim_edge(tl: Timeline, clip_id: str, edge: str, delta: int, linked: bool = True,
+              source_len: Callable[[str], float | None] | None = None) -> Transaction:
+    """Rogne un bord de `delta` images SANS décaler quoi que ce soit d'autre (le trou éventuel reste un trou).
+    Refus (rien ne change) si ça sortirait des limites de `trim_limits`. Les plans liés sont rognés pareil. Une seule annulation."""
+    if delta == 0:
+        raise TimelineError("delta nul")
+    lo, hi = trim_limits(tl, clip_id, edge, linked, source_len)
+    if not lo <= delta <= hi:
+        raise TimelineError(f"{clip_id}: rognage de {delta:+d} i impossible (permis : de {lo:+d} à {hi:+d} i)")
+    ops: list[Op] = []
+    for cid in (linked_ids(tl, clip_id) if linked else [clip_id]):
+        c = tl.clip(cid)
+        if edge == "head":
+            ops.append(TrimClip(c.id, c.start + delta, c.duration - delta, round(c.src_in + delta / tl.fps, 6)))
+        else:
+            ops.append(TrimClip(c.id, c.start, c.duration + delta, c.src_in))
+    return Transaction(ops, f"rognage {clip_id} : bord {edge} {delta:+d} i")
 
 
 # --- aimantation (magnétisme) ---------------------------------------------------------------------
