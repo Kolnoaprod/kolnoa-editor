@@ -1,6 +1,6 @@
 # Assistant de montage par prompts — proposition technique
 
-Statut : **proposition à valider** (aucun code dans cette PR, rien n'est fusionné). Elle prolonge l'architecture v2 (§1, §10 de
+Statut : **plan révisé après la revue de ChatGPT** (accord conditionnel pour le cadrage et le prototypage de A1, sous réserve de l'accord explicite du réalisateur). Aucun code dans cette PR, rien n'est fusionné, aucun développement avant accord explicite. Elle prolonge l'architecture v2 (§1, §10 de
 `ARCHITECTURE_V2.md`) : l'assistant n'est pas un chatbot posé à côté du logiciel, c'est **une troisième manière de produire les
 mêmes opérations que la souris et le clavier**, avec des consignes attachées au *contenu* de la timeline.
 
@@ -35,7 +35,7 @@ Principe : *l'IA est l'assistant monteur, le réalisateur décide.* Elle propose
 ## 3. Ce qui manque (écarts constatés dans le code)
 
 - **Aucune consigne** : le champ `Clip.note` est un texte libre sans position, sans statut, sans cycle de vie.
-- **`Marker` n'est pas un ancrage fiable** : il n'a que `frame`, et aucune opération (`ShiftAfter`, `move_clips`, `ripple_*`, scission) ne le déplace. Après un ripple, un repère pointe sur autre chose, sans avertissement. On ne peut donc pas l'utiliser tel quel pour les consignes.
+- **`Marker` n'est pas un ancrage fiable** : il n'a que `frame`, et aucune opération (`ShiftAfter`, `move_clips`, `ripple_*`, scission) ne le déplace. Après un ripple, un repère pointe sur autre chose, sans avertissement. On ne peut donc pas l'utiliser tel quel pour les consignes. **Décision de revue** : le `Marker` historique est **conservé pour la compatibilité** (aucun changement silencieux des projets existants) et n'est jamais une ancre de consigne ; la PR R (§10) ajoute deux natures explicites et visibles dans l'interface : *repère temporel fixe* (comportement actuel) et *repère lié au contenu*.
 - **Pas de marques sur les rushes** (« Obligatoire dans le teaser », « Coup de cœur », « À revoir ») : les `Subclip` du chutier s'en rapprochent mais n'ont ni nature typée, ni lien avec la timeline.
 - **Une seule timeline par projet** (`_session(project)` : un dossier de session) : pas de séquence teaser indépendante.
 - **Pas de transitions vidéo ni d'étalonnage dans le moteur** : seuls les fondus enchaînés audio existent ; `Clip.extra` est « réservé ». Les consignes « transition » et « couleur » ne peuvent être exécutées qu'après cette brique (PR K).
@@ -77,6 +77,16 @@ Résultats typés, jamais un « à peu près » :
 
 Comme la position est **recalculée** et non réécrite, aucune opération existante n'a besoin de connaître les consignes : déplacer,
 scinder, raccourcir, ripple, changer d'angle, annuler/rétablir restent corrects par construction. C'est le choix central de la proposition (alternative écartée : faire suivre chaque opération par une réécriture des ancres — fragile, et chaque nouvelle opération risquerait d'oublier de le faire).
+
+#### Conditions de la PR A1 (revue ChatGPT)
+
+- **Identifiant de média stable** (`media_id`, empreinte de contenu + chemin relatif en indice), pas uniquement le chemin : un média réimporté ou déplacé garde ses ancres ; sinon la consigne devient `perdue` et on demande confirmation.
+- **Bases de temps rationnelles** (`src_fps` rationnel) et conversions image source ↔ image timeline testées dans les deux sens. Aujourd'hui `Timeline.fps` est entier et le modèle n'a ni vitesse ni ralenti : **sont refusés explicitement en V1** (avec message, jamais « presque exacts ») : source à cadence variable (VFR), 23,976 / 29,97 i/s, retiming/ralenti. Ils seront traités quand le moteur les supportera.
+- **Occurrence exacte ≠ contenu dupliqué** : un même contenu posé plusieurs fois est `multiple`, jamais choisi au hasard.
+- **Une plage qui traverse plusieurs plans est une collection de segments résolus**, pas deux ancres extrêmes : supprimer un plan intermédiaire ne doit jamais élargir implicitement la cible (état `fragmentée` + confirmation).
+- Cas testés en plus des suites aléatoires (≥ 10 000) : réimport/déplacement de média, mêmes plages réutilisées, changement d'angle multicam, filiation des plans, annulation/reprise, changement de séquence.
+- En cas de `multiple`, `hors_plan`, `fragmentée` ou `perdue` : **jamais d'application sans confirmation**. L'ancre garantit la stabilité du ciblage, pas la compréhension sémantique du prompt : l'IA propose, la compilation valide, le réalisateur approuve.
+- Les promesses de performance (p95) et d'exactitude sont **vérifiées par des tests reproductibles** (graine fixe, rapport chiffré), pas seulement documentées.
 
 ### 4.2 Consigne (`Directive`)
 
@@ -129,6 +139,8 @@ sont partagées. « Construire le teaser » = une proposition sur la séquence t
 réversible, qui n'altère jamais la séquence principale.
 
 ### 4.6 Journal de l'assistant
+
+*(Condition de revue : le journal d'audit reste séparé, mais il est relié **transactionnellement** au journal de session — chaque événement d'audit référence la position du journal de session ; au redémarrage, la reprise est **idempotente** (rejouer deux fois n'ajoute rien), un crash entre les deux écritures est détecté et réparé, et une consigne **annulée** n'est pas confondue avec un échange **historisé**.)*
 
 `assistant.jsonl` (append-only, fsync, mêmes garanties que `history.jsonl`) : consignes créées/modifiées, demandes d'analyse (fournisseur, modèle,
 empreinte du contexte envoyé, consentement), propositions (intentions + opérations compilées), décisions (acceptée / refusée / modifiée), lien vers
@@ -194,7 +206,7 @@ Le socle UI actuel (#9 → #24) reste inchangé tant qu'il n'est pas validé : l
 
 | PR | Contenu | Tests principaux | Critères de validation | Dépend de |
 | --- | --- | --- | --- | --- |
-| **A1 — Ancres de contenu** | `ContentAnchor`, `resolve()`, états typés (§4.1). Module pur, aucun changement de schéma. | Pour chaque opération du moteur (déplacer, scinder, raccourcir, ripple, supprimer, changer d'angle, copier-reprise, annuler/rétablir) : l'ancre se résout sur la bonne image ; aléatoire (propriété) sur des suites d'opérations ; fps 25 et 50 ; multicam avec dérive ; `multiple`/`perdue` détectés. | 0 résolution fausse silencieuse sur ≥ 10 000 suites aléatoires ; conversions image↔temps exactes pour toutes les images d'un plan de 1 h. | — |
+| **A1 — Ancres de contenu** | `ContentAnchor`, `resolve()`, états typés (§4.1) et conditions de revue (média stable, bases de temps rationnelles, segments, refus explicites VFR/29,97/ralentis). Module pur, aucun changement de schéma. | Pour chaque opération du moteur (déplacer, scinder, raccourcir, ripple, supprimer, changer d'angle, copier-reprise, annuler/rétablir) : l'ancre se résout sur la bonne image ; aléatoire (propriété) sur des suites d'opérations ; fps 25 et 50 ; multicam avec dérive ; `multiple`/`perdue` détectés. | 0 résolution fausse silencieuse sur ≥ 10 000 suites aléatoires ; conversions image↔temps exactes pour toutes les images d'un plan de 1 h. | — |
 | **A2 — Consignes dans le modèle** | `Directive`, schéma + migration, opérations `AddDirective`/`SetDirective`/`SetStatus`/`RemoveDirective` (annulables, journalisées), `Marker` inchangé. | Aller-retour JSON, rejeu du journal, undo/redo, migration d'un ancien projet, copie `scoped_copy` ne les perd pas. | Un projet existant s'ouvre à l'identique ; annuler/rétablir exacts ; aucune consigne supprimée par une opération sur les plans. | A1 |
 | **B — Saisie des consignes (UI)** | « Ajouter un prompt ici » (tête de lecture), « … à la sélection » (plans sélectionnés ou plage), raccourcis configurables, liste des consignes, pastilles sur la timeline, signalement visuel des ambiguïtés, navigation consigne ↔ image. | Tests de logique sans écran (comme `layout.py`) ; création depuis tête de lecture / sélection ; consignes qui suivent un déplacement de plan ; états ambigus affichés. | Une consigne posée reste sur le bon plan après déplacement, scission, raccourcissement, ripple ; aucune régression des tests UI existants ; fluidité timeline mesurée comme pour #18. | A2 |
 | **C — Marques sur rushes** | `MediaMark` (3 natures), opérations annulables, affichage chutier + timeline, raccourcis. | Persistance, projection sur plusieurs timelines, suppression d'un plan sans perte de la marque. | Une marque posée sur un rush est retrouvée sur toute timeline qui l'utilise ; rushes jamais écrits (test d'empreinte). | A1 |
@@ -203,11 +215,15 @@ Le socle UI actuel (#9 → #24) reste inchangé tant qu'il n'est pas validé : l
 | **F — Contexte et fournisseur IA** | `Provider`, `FakeProvider`, paquet de contexte, consentement et aperçu de l'envoi, estimation de coût, clarification typée, `assistant.jsonl`. | Contexte déterministe (golden) ; sorties invalides rejetées ; clarification déclenchée sur ambiguïté ; aucun appel réseau en test ; aucune vidéo ni chemin superflu dans le contexte. | Les 5 exemples du réalisateur (§6) rejoués avec `FakeProvider` → intentions attendues ; journal complet et rejouable. | E, A1 |
 | **G — Revue des propositions** | Aperçu avant/après (fantômes sur la timeline, lecture proxy), acceptation en lot ou une par une, **une** transaction par proposition, libellés d'historique, panneau d'historique du projet. | Accepter = un pas d'undo ; refuser n'écrit rien ; lot partiellement accepté ; recompilation affichée si la base a changé. | Après acceptation puis annulation, la timeline est identique bit à bit ; l'aperçu ne modifie pas l'état. | F, B |
 | **H — Dialogue de correction** | Révisions de proposition, correction compensatoire, « annuler seulement celle-ci » conditionnel (§7). | Les trois cas de §7 ; travail validé intact ; refus expliqué si l'inverse ne s'applique pas proprement. | Aucune correction ne modifie un plan non ciblé ; aucun dépilage au milieu de l'historique. | G |
+| **I1 — File de tâches persistante** | Étapes **idempotentes**, progression et journal lisibles, reprise après fermeture/redémarrage, erreurs réseau/Drive et médias manquants, aucune obligation de garder le chat ouvert. | Reprise après interruption à chaque étape ; deux exécutions = un seul effet ; erreurs simulées. | Rien n'est refait ni perdu après un redémarrage. | — |
+| **I2 — Mode mission autonome** | Voir §13. Une instruction → plan d'exécution lisible → exécution asynchrone → montage candidat. | Scénario de bout en bout sur données synthétiques avec `FakeProvider` et faux connecteur ; arrêts aux seuls vrais points de décision. | Scénario d'acceptation du §13 sur un vrai projet. | I1, F, G |
 | **I — Orchestrateur de workflow** | Enchaînement import → proxys → synchro → cas incertains → préparation multicam, points de contrôle, file de validation ; préparation automatique via `record_angle_switches` (une transaction). Score de stabilité en **mode mesure d'abord** (rapport lecture seule). | Reprise après interruption ; arrêt sur cas incertain ; premier montage = un pas d'undo ; scores sur vidéos synthétiques. | Les commandes actuelles donnent les mêmes résultats ; **aucune annonce de précision visuelle** avant mesures sur de vrais rushes (livrable : rapport, pas une promesse). | — (s'intègre à F/G ensuite) |
+| **R — Repères suivis** | Natures explicites de repère : *temps fixe* (historique, inchangé) et *lié au contenu* (via ancres) ; visibles dans l'UI ; migration **sans changer la sémantique** des projets existants. | Un ancien projet s'ouvre à l'identique ; un repère lié suit un déplacement/une scission ; un repère fixe ne bouge pas ; affichage distinct. | Aucun repère existant ne change de comportement. | A1 |
+| **S — Paramètres : Assistants IA** | *Paramètres > Assistants IA* : fournisseurs, clés API (coffre sécurisé de l'OS, jamais dans le projet, le journal ni Git), test de connexion, modèle, fournisseur par défaut, désactivation/révocation, état de disponibilité ; texte clair sur la **différence abonnement grand public / accès API** (aucune promesse que l'abonnement ouvre l'API ; OAuth seulement si un flux officiel existe) ; coût estimé, aperçu des données, consentement ; panneau de conversation lié au projet ; **comparaison de deux propositions indépendantes** avant validation. | Secrets absents du projet/journal/logs ; révocation effective ; aperçu = octets réellement envoyés ; `FakeProvider` ; refus des propositions invalides. | Aucune vidéo transmise par défaut ; l'assistant embarqué est une instance API distincte de la conversation personnelle (aucune synchronisation de leurs historiques) ; la **mémoire Kolnoa** (consignes, profil) reste locale, versionnée, portable, partageable entre fournisseurs sous consentement. | F |
 | **J — Modes Expert / Épuré** | `UiProfile`, dispositions, palette de commandes complète. | Règles (a)–(d) du §9. | Journal d'opérations identique dans les deux modes pour un même scénario. | B |
 | **K — Transitions vidéo et étalonnage dans le moteur** | Opérations et rendu pour transitions (fondu, dissolve, fondu au noir) et réglages d'étalonnage non destructifs ; export `convert.py` sans perte silencieuse. | Parité aperçu/export (SSIM), exactitude des durées à l'image, aller-retour du modèle. | Prérequis des intentions `Transition` et `Grade` ; sans lui, l'assistant les refuse explicitement. | — |
 
-Ordre de revue proposé : A1 → A2 → (B, C en parallèle) → D → E → F → G → H → (I, J, K en parallèle selon les priorités). Les PR A1, C, I et K peuvent être relues indépendamment.
+Ordre révisé (revue) : **A1 → A2 → (B, C) → E → F → G** en priorité fonctionnelle, pour obtenir tôt un premier montage par prompts réellement utilisable. **D** peut avancer après C sans retarder ce premier montage. **K** avance **en parallèle assez tôt** pour que transitions et couleur ne soient pas une impasse, sans bloquer F/G (les intentions non prises en charge sont **refusées explicitement**). **I (I1, I2, orchestrateur + mesure de stabilité sur rushes réels)** en parallèle. **H après G ; J après B ; R après A1 ; S après F.** Les PR A1, C, I1 et K peuvent être relues indépendamment.
 
 ## 11. Risques et points ouverts
 
@@ -218,11 +234,30 @@ Ordre de revue proposé : A1 → A2 → (B, C en parallèle) → D → E → F �
 - **Confidentialité** : texte compact seulement, consentement par projet, aperçu de l'envoi, journal des envois ; dépôt public ⇒ fixtures neutres (« rush 1 »…).
 - **29,97 i/s** : `fps` entier dans le modèle ; à trancher séparément.
 
-## 12. Décisions demandées
+## 12. Décisions (état après revue)
 
-1. Ancrage **par contenu avec recalcul** (proposé) plutôt que réécriture des ancres à chaque opération : valider ?
-2. Consignes **dans la timeline** (journal de session, undo) plutôt que dans un fichier à côté : valider ? (proposé : dans la session ; le journal assistant reste à part.)
-3. `MediaMark` au niveau du **projet** (partagé entre séquences) : valider ?
-4. Fournisseurs : Claude et OpenAI derrière une interface commune, et **aucun** langage libre hors ligne : valider ?
-5. Ordre de revue et priorité de K (transitions/couleur) par rapport à F/G.
-6. Faut-il garder `Marker` tel quel (repère libre non suivi) en le documentant, ou le faire suivre les opérations dans une PR séparée ?
+1. **Ancrage par contenu avec recalcul : validé**, sous les conditions de A1 (§4.1) ; jamais de ciblage silencieux si perdu / ambigu / fragmenté, le logiciel demande confirmation.
+2. **Consignes dans le modèle/session et son undo/redo : validé**, avec journal d'audit séparé mais relié transactionnellement (§4.6).
+3. **`MediaMark` au niveau projet : validé** (plage source exacte, média/angle, catégorie, note, statut ; modification/suppression annulables ; marques obligatoires jamais omises silencieusement dans le teaser).
+4. **Fournisseurs Claude/OpenAI + `FakeProvider`, langage libre via un fournisseur : validé** ; hors ligne : fonctions manuelles et intentions structurées ; fournisseur local possible plus tard ; consentement, contrôle du contexte, secrets hors projet.
+5. **Ordre** : voir §10 (révisé).
+6. **`Marker` conservé** pour la compatibilité, jamais une ancre ; PR R pour les natures explicites.
+
+Restent à trancher : seuils de performance mesurables pour A1 (valeurs de départ à fixer par mesure), format exact de l'`media_id`, taxonomie initiale des natures de repère.
+
+## 13. Mode mission autonome (exigence produit prioritaire)
+
+Le confort actuel est une demande de bout en bout : *« Va dans mon Drive, cherche les rushes du mariage X, utilise la musique jointe pour l'intro, prépare un multicam propre avec les plans stables, ajoute les plans de coupe, puis on fera les finitions. »* Il confie la mission et revient examiner le résultat. **Ce confort ne doit pas disparaître au profit de formulaires ou de micro-prompts.**
+
+- **Interface « Nouvelle mission »** : zone de texte + pièces jointes (musique…), un seul geste ; le mode Expert reste facultatif (§9).
+- **Plan d'exécution lisible** produit par l'assistant puis exécuté par **l'application** : trouver le dossier Drive demandé → inventorier les médias → récupérer/mettre en cache les rushes → associer la musique jointe → créer les proxys → synchroniser → signaler les angles incertains → proposer structure d'intro et multicam → choisir plans stables et plans de coupe → préparer une séquence de travail.
+- **L'accès au Drive n'est pas fait par le modèle** : un connecteur Google Drive authentifié, autorisé par l'utilisateur et limité au dossier demandé, est piloté par l'orchestrateur ; stockage/cache configurables, espace disque contrôlé, originaux intacts. Aucune promesse qu'une simple API de modèle accède au Drive.
+- **Asynchrone et reprenable** (PR I1) : file persistante, étapes idempotentes, progression et journal compréhensibles, reprise après redémarrage, gestion des erreurs réseau/Drive et médias manquants, chat fermé sans conséquence.
+- **Autonomie graduée** : import, analyse, proxys et brouillons **non destructifs** sans validation à chaque étape ; arrêt **seulement** aux vrais points de décision : média ambigu, droits, coût externe, synchronisation douteuse, écrasement/export. Un **montage candidat** (lecture/aperçu) est présenté avant toute application au montage validé.
+- **Musique** : sélection explicite du morceau joint, gestion des droits, aucune piste inventée ; **aucune vidéo envoyée à un modèle cloud par défaut**.
+- **Finitions conversationnelles** : « raccourcis l'intro », « change cet angle », « mets davantage de plans de coupe », « garde ce regard » ; contexte et corrections conservés dans le projet, undo/redo, mémoire de style soumise à validation (`DIRECTOR_MEMORY.md`).
+- **Scénario d'acceptation de bout en bout (vrai projet)** : mission unique → traitement en autonomie → proposition multicam → validation → finitions. Il est exécuté d'abord en test automatisé avec faux connecteur et `FakeProvider`, puis sur un vrai projet par le réalisateur ; rien n'est annoncé comme réussi avant.
+
+## 14. Assistants OpenAI et Anthropic intégrés (lot distinct : PR S)
+
+Lot UI/configuration + intégration, **sans perturber l'ordre A1/A2/E/F/G** : paramètres des assistants, clés dans le coffre de l'OS, test de connexion, modèle et fournisseur par défaut, désactivation/révocation, état de disponibilité ; transparence sur les comptes (un abonnement grand public ne vaut pas accès API ; coûts éventuels expliqués ; OAuth seulement si un flux officiel existe) ; panneau de conversation lié au projet ; choix du fournisseur par demande, comparaison possible de deux propositions indépendantes ; aperçu des données transmises, consentement, coût estimé, logs sans secrets, validation obligatoire, annulation par les opérations de session. L'assistant embarqué est une **instance API distincte** de la conversation personnelle : aucune synchronisation automatique de mémoires ou d'historiques ; la continuité vient de la **mémoire Kolnoa explicite, locale, portable, versionnée et contrôlée par l'utilisateur**.
