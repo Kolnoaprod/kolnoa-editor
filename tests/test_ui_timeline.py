@@ -244,3 +244,27 @@ def test_trim_respects_source_length(view):
     QTest.mouseMove(view, QPoint(xr + int(30 * view.vp.zoom), y))
     assert view._trim["hi"] == 5 and view._trim["delta"] <= 5
     QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(xr + int(30 * view.vp.zoom), y))
+
+
+def test_alt_drag_is_ripple_with_follower_preview_and_one_undo(view):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+    tl, c, nxt, y = _trim_setup(view)
+    after0 = [(k.id, k.start) for k in tl.clips_on("V1") if k.start >= c.end]
+    dur0 = c.duration
+    xr = int(view.vp.x_of(c.end)) - 2
+    QTest.mousePress(view, Qt.LeftButton, Qt.NoModifier, QPoint(xr, y))
+    QTest.mouseMove(view, QPoint(xr + 3, y), delay=-1)
+    QTest.mouseMove(view, QPoint(xr + int(40 * view.vp.zoom) + 3, y), delay=-1)
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtCore import QEvent, QPointF
+    pos = QPointF(xr + int(40 * view.vp.zoom) + 3, y)
+    view.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, pos, pos, Qt.NoButton, Qt.LeftButton, Qt.AltModifier))
+    assert view._trim["ripple"] and view._trim["delta"] >= 38            # au-delà du voisin : permis, la suite est poussée
+    view.grab()                                                          # dessin de l'aperçu (fantômes des plans suivants) sans erreur
+    view.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, pos, pos, Qt.LeftButton, Qt.NoButton, Qt.AltModifier))
+    d = tl.clip(c.id).duration - dur0
+    assert d >= 38
+    assert all(tl.clip(i).start == s + d for i, s in after0)
+    view.session.undo()
+    assert tl.clip(c.id).duration == dur0 and all(tl.clip(i).start == s for i, s in after0)

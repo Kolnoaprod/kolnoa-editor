@@ -10,4 +10,7 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
   Le rognage simple ne décale rien d'autre (ripple/roll existent déjà dans le moteur).
 - Vue : poignée de 6 px à chaque bord (curseur ↔), aimantation sur bords/repères/tête de lecture, **prévisualisation** (fantôme + trait + « +N i · timecode »,
   orange « limite » quand on bute), Échap annule, le relâcher valide en UNE transaction. Les plans liés suivent. Rien n'est écrit pendant le glisser.
-- Tests : `tests/test_trim.py` (moteur) et `tests/test_ui_timeline.py` (geste complet, limite, Échap, poignées source).
+- **Alt + glisser = ripple** (arbitrage de revue) : `ripple_limits` / `ripple_edge` (moteur). La suite de la piste (et des pistes des plans liés) suit ; pas de limite de
+  voisin ; restent durée ≥ 1 image + fondus, poignées du rush, liés, verrous. Aperçu : étiquette `RIPPLE`, fantômes orange des plans qui bougent, et **validation du moteur**
+  pendant le geste (essai sur copie, une fois par valeur de delta ; erreur affichée en rouge) puis revalidation à l'application (`Session.do` atomique). Alt peut être pressé/relâché en cours de geste.
+- Tests : `tests/test_trim.py` (moteur, ripple compris) et `tests/test_ui_timeline.py` (geste complet, limite, Échap, poignées source, Alt+glisser + annulation).
