@@ -21,7 +21,7 @@ from ..timeline.model import Clip, Timeline
 from .anchor import (AXIS_GROUP, AXIS_MEDIA, JOIN_TOL_US, ContentAnchor, RangeAnchor, clip_axis_in_us, clip_axis_out_us,
                      clip_unsupported, context_sig, media_id_of)
 from .registry import PRESENT, MediaRegistry
-from .timebase import BIAS_US, US, seconds_to_us, us_to_offset
+from .timebase import BIAS_US, US, seconds_to_us, us_to_end_offset, us_to_offset
 
 NON_SUPPORTEE, PERDUE, FRAGMENTEE, MULTIPLE, HORS_PLAN, CONTEXTE, EXACTE = (
     "non_supportée", "perdue", "fragmentée", "multiple", "hors_plan", "contexte_modifié", "exacte")
@@ -144,7 +144,7 @@ class Resolver:
 
     def _gate(self, a) -> Resolution | None:
         k = (a.axis, a.key)
-        if k in self._unsupported and k not in self._idx:
+        if k in self._unsupported:      # un seul plan non supporté de cette source suffit : on ne choisit pas « les autres »
             return Resolution(a.id, NON_SUPPORTEE, reason=self._unsupported[k], token=self.token)
         why = self._dead(a.axis, a.key)
         if why:
@@ -156,7 +156,7 @@ class Resolver:
         if stop:
             return stop
         k = (a.axis, a.key)
-        flags = ("clips_non_supportés",) if k in self._unsupported else ()
+        flags = ()
         ax = self._idx.get(k)
         hits = ax.overlapping(a.us, a.us + 1, JOIN_TOL_US) if ax else []
         cands = [t for t in hits if self._contains(t, a)]
@@ -206,7 +206,7 @@ class Resolver:
         if stop:
             return stop
         k = (a.axis, a.key)
-        flags = ["clips_non_supportés"] if k in self._unsupported else []
+        flags = []
         ax = self._idx.get(k)
         segs: list[Segment] = []
         for lo, hi, c in (ax.overlapping(a.start_us, a.end_us) if ax else []):
@@ -215,7 +215,7 @@ class Resolver:
                 continue
             f0 = self._axis_us_to_frame(c, a.axis, s, lo)
             f1 = c.end if e >= hi - JOIN_TOL_US else c.start + min(
-                c.duration, us_to_offset(self._to_clip_us(c, a.axis, e) - seconds_to_us(c.src_in), self.tl.fps))
+                c.duration, us_to_end_offset(self._to_clip_us(c, a.axis, e) - seconds_to_us(c.src_in), self.tl.fps))
             if f1 > f0:
                 segs.append(Segment(c.id, c.track, f0, f1, s, e))
         if not segs:

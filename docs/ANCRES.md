@@ -20,9 +20,9 @@ Implémente `docs/A1_ANCRES_PROPOSITION.md`. Aucune modification du schéma de l
 | `fragmentée` | plage partielle, trouée ou répartie | `AcceptFragments()` |
 | `hors_plan` | média utilisable, instant non utilisé dans le montage | `AcceptNearestEdge()` (bord de plan le plus proche) |
 | `perdue` | média manquant/remplacé/inconnu, groupe supprimé | **jamais** |
-| `non_supportée` | VFR, cadence non entière, vitesse ≠ 1 | **jamais** |
+| `non_supportée` | VFR, cadence non entière, vitesse ≠ 1 sur AU MOINS un plan de cette source (on ne choisit pas « les autres ») | **jamais** |
 
-Précédence quand plusieurs s'appliquent : non_supportée > perdue > fragmentée > multiple > hors_plan > contexte_modifié > exacte ; les autres restent dans `flags` (`doublon`, `dispersée`, `clips_non_supportés`).
+Précédence quand plusieurs s'appliquent : non_supportée > perdue > fragmentée > multiple > hors_plan > contexte_modifié > exacte ; les autres restent dans `flags` (`doublon`, `dispersée`).
 
 ## Garanties
 - Une cible n'existe que via `Resolution.confirm` ; `ConfirmedTarget(...)` direct lève `TypeError`. Un choix superflu ou inadapté est refusé.

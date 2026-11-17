@@ -36,3 +36,8 @@ def offset_to_us(offset_frames: int, fps: int) -> int:
 def us_to_offset(delta_us: int, fps: int) -> int:
     """µs depuis l'entrée du plan → numéro d'image (plancher) ; le biais de ½ µs rend l'aller-retour exact avec `offset_to_us`."""
     return ((delta_us + BIAS_US) * fps) // US
+
+
+def us_to_end_offset(delta_us: int, fps: int) -> int:
+    """µs depuis l'entrée → borne de fin EXCLUE en images : plafond avec la même tolérance (une image entamée compte)."""
+    return -(-((delta_us - BIAS_US) * fps) // US)
