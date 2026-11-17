@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication
 from kolnoa_editor.timeline import Clip, Timeline, Track
 from kolnoa_editor.timeline.session import Session
 from kolnoa_editor.ui.peak_service import PeakService
+from kolnoa_editor.ui.peaks import PeakPyramid
 from kolnoa_editor.ui.timeline_view import TimelineView
 
 
@@ -217,4 +218,152 @@ def test_real_ffmpeg_stream_matches_the_synchronous_loader(qapp, tmp_path):
     assert abs(len(got.levels[0]) - len(ref.levels[0])) <= 1
     n = min(len(got.levels[0]), len(ref.levels[0]))
     assert np.array_equal(got.levels[0][:n - 1], ref.levels[0][:n - 1])
+    svc.close()
+
+
+# --- revue #23 : rush modifié pendant la session, plafond mémoire LRU, purge du cache disque -------------------------
+def size_level_compute(chunks=3, delay=0.02, gate=None, started=None):
+    """Calcul factice dont le résultat dépend du CONTENU du fichier (taille) : on voit si on a lu l'ancien ou le nouveau."""
+    def run(path, on_bins, cancel, procs):
+        level = os.path.getsize(path) % 200 + 1
+        if started is not None:
+            started.set()
+        if gate is not None:
+            gate.wait(5)
+        for _ in range(chunks):
+            if cancel.is_set():
+                return False
+            time.sleep(delay)
+            on_bins(np.full(100, level, dtype=np.uint8))
+        return True
+    return run
+
+
+def final(svc, media, timeout=6):
+    assert wait_for(lambda: (svc.get(media) is not None and svc.get(media).complete), timeout), "calcul non terminé"
+    return svc.get(media)
+
+
+def test_media_modified_during_session_invalidates_the_in_memory_pyramid(qapp, tmp_path):
+    f = tmp_path / "r.wav"
+    f.write_bytes(b"a" * 50)
+    svc = PeakService(cache_dir=tmp_path / "c", compute=size_level_compute(), workers=1, recheck_s=0.0, purge_on_start=False)
+    old = final(svc, str(f))
+    assert int(old.levels[0][0]) == 50 % 200 + 1
+    f.write_bytes(b"b" * 77)                                           # le rush est remplacé pendant la session
+    assert wait_for(lambda: svc.get(str(f)) is None or svc.get(str(f)) is not old, 3)      # l'ancienne pyramide n'est plus servie
+    new = final(svc, str(f))
+    assert int(new.levels[0][0]) == 77 % 200 + 1 and svc.stats["invalidated"] >= 1
+    svc.close()
+
+
+def test_media_modified_while_computing_discards_the_stale_result_and_recomputes(qapp, tmp_path):
+    f = tmp_path / "r.wav"
+    f.write_bytes(b"a" * 50)
+    gate, started = threading.Event(), threading.Event()
+    svc = PeakService(cache_dir=tmp_path / "c", compute=size_level_compute(gate=gate, started=started), workers=1,
+                      recheck_s=0.0, purge_on_start=False)
+    svc.get(str(f))
+    assert started.wait(3)
+    f.write_bytes(b"b" * 90)                                           # modifié PENDANT le calcul de l'ancienne version
+    gate.set()
+    p = final(svc, str(f), 10)
+    assert int(p.levels[0][0]) == 90 % 200 + 1                         # la pyramide finale est celle du NOUVEAU fichier
+    assert svc.stats["discarded_stale"] >= 1
+    svc.close()
+    keys = list((tmp_path / "c").glob("*.npy"))
+    assert len(keys) == 1                                              # l'ancienne version n'a jamais été écrite sous la clé de la nouvelle
+    assert int(np.load(keys[0])[0]) == 90 % 200 + 1
+
+
+def test_silent_media_that_gains_audio_is_seen_again(qapp, tmp_path):
+    f = tmp_path / "m.mp4"
+    f.write_bytes(b"x")
+    mode = {"audio": False}
+    def comp(path, on_bins, cancel, procs):
+        if mode["audio"]:
+            on_bins(np.full(100, 9, dtype=np.uint8))
+            return True
+        return False
+    svc = PeakService(compute=comp, workers=1, recheck_s=0.0, purge_on_start=False)
+    svc.get(str(f)); assert wait_for(svc.idle, 3)
+    assert svc.get(str(f)) is None
+    mode["audio"] = True
+    f.write_bytes(b"xyz")                                              # nouvel export avec son
+    assert wait_for(lambda: svc.get(str(f)) is not None, 5)
+    svc.close()
+
+
+def test_explicit_invalidate_forgets_pyramid_and_silent_state(qapp, tmp_path):
+    f = tmp_path / "r.wav"; f.write_bytes(b"a" * 10)
+    svc = PeakService(compute=size_level_compute(), workers=1, purge_on_start=False)
+    final(svc, str(f))
+    svc.invalidate(str(f))
+    assert str(f) not in svc._pyr
+    final(svc, str(f))
+    svc.close()
+
+
+def test_ram_is_capped_with_lru_and_visible_media_are_never_evicted(qapp, tmp_path):
+    files = []
+    for i in range(6):
+        f = tmp_path / f"r{i}.wav"; f.write_bytes(b"a" * (10 + i)); files.append(str(f))
+    one = PeakPyramid(np.zeros(300, dtype=np.uint8)).nbytes
+    svc = PeakService(cache_dir=tmp_path / "c", compute=size_level_compute(chunks=3, delay=0.0), workers=1,
+                      max_ram_bytes=int(one * 2.5), purge_on_start=False)
+    svc.want([files[0]])                                              # r0 est « à l'écran »
+    for f in files:
+        svc.get(f)
+    assert wait_for(svc.idle, 8)
+    assert svc.ram_bytes() <= one * 2.5 + one                         # plafond respecté (marge : l'élément protégé)
+    assert svc.stats["evicted"] >= 3 and files[0] in svc._pyr         # le visible reste
+    gone = next(f for f in files if f not in svc._pyr)
+    c0 = svc.stats["computed"]
+    final(svc, gone)                                                  # ré-affiché : relu depuis le disque, pas recalculé
+    assert svc.stats["computed"] == c0 and svc.stats["from_cache"] >= 1
+    svc.close()
+
+
+def test_lru_order_recently_used_survives(qapp, tmp_path):
+    files = []
+    for i in range(3):
+        f = tmp_path / f"r{i}.wav"; f.write_bytes(b"a" * (10 + i)); files.append(str(f))
+    one = PeakPyramid(np.zeros(300, dtype=np.uint8)).nbytes
+    svc = PeakService(compute=size_level_compute(chunks=3, delay=0.0), workers=1, max_ram_bytes=int(one * 2.2), purge_on_start=False)
+    final(svc, files[0]); final(svc, files[1])
+    svc.get(files[0])                                                 # r0 touché : r1 devient le moins récent
+    final(svc, files[2])                                              # dépasse le plafond : évince r1, pas r0
+    assert files[0] in svc._pyr and files[1] not in svc._pyr
+    svc.close()
+
+
+def test_disk_purge_by_age_size_and_stale_tmp(qapp, tmp_path):
+    c = tmp_path / "c"; c.mkdir()
+    now = time.time()
+    def mk(name, size, age_days):
+        f = c / name
+        f.write_bytes(b"0" * size)
+        os.utime(f, (now - age_days * 86400,) * 2)
+        return f
+    old = mk("old.npy", 100, 200)
+    a, b, d = mk("a.npy", 400, 3), mk("b.npy", 400, 2), mk("d.npy", 400, 1)
+    tmp_old, tmp_new = mk("x.1.tmp", 10, 1), mk("y.2.tmp", 10, 0)
+    other = tmp_path / "c" / "notes.txt"; other.write_text("à ne pas toucher")
+    svc = PeakService(cache_dir=c, compute=size_level_compute(), workers=1, purge_on_start=False, disk_bytes=900, disk_days=90)
+    n = svc.purge_cache()
+    assert not old.exists() and not tmp_old.exists() and tmp_new.exists()      # vieux (> 90 j) et .tmp abandonné supprimés, .tmp récent gardé
+    assert not a.exists() and b.exists() and d.exists()                          # 3×400 > 900 : le moins récemment utilisé part
+    assert other.exists() and n == 3 and svc.stats["purged_files"] == 3
+    assert svc.purge_cache(max_bytes=0, max_age_days=90) == 2 and not list(c.glob("*.npy"))
+    svc.close()
+
+
+def test_purge_runs_in_background_at_startup_and_never_blocks(qapp, tmp_path):
+    c = tmp_path / "c"; c.mkdir()
+    f = c / "old.npy"; f.write_bytes(b"0" * 10)
+    os.utime(f, (time.time() - 400 * 86400,) * 2)
+    t0 = time.perf_counter()
+    svc = PeakService(cache_dir=c, compute=size_level_compute(), workers=1)    # purge_on_start par défaut
+    assert time.perf_counter() - t0 < 0.5
+    assert wait_for(lambda: not f.exists(), 3)
     svc.close()

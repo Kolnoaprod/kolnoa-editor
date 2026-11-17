@@ -22,6 +22,10 @@ class PeakPyramid:
             n = len(a) // 2 * 2
             self.levels.append(np.maximum(a[:n:2], a[1:n:2]))
 
+    @property
+    def nbytes(self) -> int:
+        return sum(a.nbytes for a in self.levels)
+
     def covers(self, t: float) -> bool:
         """Les crêtes sont-elles disponibles jusqu'à la seconde `t` (ou le calcul est-il terminé) ?"""
         return self.complete or t <= self.duration

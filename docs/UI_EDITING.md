@@ -52,3 +52,14 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
   du pan/zoom ne change pas (mêmes caches par plan) → fluidité conservée.
 - Arrêt propre : `close()` annule et tue ffmpeg (< 2 s). Tests : `tests/test_peak_service.py` (progressif, priorité, cache, corruption, annulation, fluidité du dessin
   pendant le calcul sur 480 plans / 8 pistes : médiane ~3 ms, p95 ~6 ms dans le bac à sable, rendu logiciel).
+
+### Revue #23 — rush modifié, mémoire plafonnée, purge du cache disque
+- **Rush modifié pendant la session** : chaque pyramide mémorise la signature du fichier (taille + date) prise AU DÉBUT du calcul ; `get()` re-vérifie au plus 1×/s
+  (`recheck_s`). Changement → pyramide jetée (jamais servie périmée), état « sans audio » oublié (un nouvel export avec son est revu), onde redessinée.
+  Modifié **pendant** le calcul : le résultat est jeté (`discarded_stale`), le rush est recalculé sur le nouveau fichier ; la clé du cache disque vient de la signature
+  de DÉBUT, donc l'ancienne version n'est jamais écrite sous la clé de la nouvelle. `invalidate(media)` pour l'appelant qui sait (re-synchro, remplacement de rush).
+- **Mémoire** : plafond LRU (`max_ram_bytes`, 128 Mo par défaut ≈ 1,3 M s de média) ; le moins récemment utilisé est évincé, **jamais** un rush visible (`want`) ni en calcul ;
+  un rush évincé qui revient est relu du disque (pas recalculé).
+- **Cache disque** : `purge_cache()` (lancée en arrière-plan au démarrage) supprime les `.tmp` abandonnés (> 1 h), les entrées non utilisées depuis 90 jours puis les plus
+  anciennes au-delà de 1 Go ; un accès (`utime`) rafraîchit une entrée ; ne touche qu'aux `*.npy`/`*.tmp` du dossier de cache.
+- Tests (8 de plus) : modification en session, pendant le calcul, muet → avec son, invalidation explicite, plafond/LRU/visible protégé, purge âge/taille/tmp, purge au démarrage non bloquante.
