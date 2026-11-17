@@ -10,7 +10,7 @@ Choix de performance (mesurés par le benchmark : 8 ms de redessin, 100 % d'un c
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
+from PySide6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
@@ -37,18 +37,26 @@ class TimelineView(QWidget):
     edited = Signal(str)               # libellé de l'action validée dans la session
     rejected = Signal(str)             # action refusée par le moteur (chevauchement, piste verrouillée…)
 
-    def __init__(self, session: Session, peaks_provider=None, parent=None, source_len=None, shortcuts=None):
+    def __init__(self, session: Session, peaks_provider=None, parent=None, source_len=None, shortcuts=None, peak_service=None):
         super().__init__(parent)
         self.session = session
         self.shortcuts = shortcuts or Shortcuts()
         self.source_len = source_len or (lambda media: None)           # media -> durée du rush en secondes | None
-        self.peaks_provider = peaks_provider or (lambda media: None)   # media -> PeakPyramid | None
+        self.peak_service = peak_service
+        self.peaks_provider = peak_service.get if peak_service is not None else (peaks_provider or (lambda media: None))   # media -> PeakPyramid | None, jamais bloquant
+        self._visible_media: list[str] = []
+        if peak_service is not None:
+            peak_service.changed.connect(self._peaks_changed)
         self.vp = L.Viewport()
         self.playhead = 0
         self.selection: list[str] = []
         self._drag: dict | None = None
         self._trim: dict | None = None
         self._drop: dict | None = None
+        self._wave_timer = QTimer(self)
+        self._wave_timer.setSingleShot(True)
+        self._wave_timer.setInterval(80)
+        self._wave_timer.timeout.connect(self.update)
         self.drop_mode = "overwrite"              # 'overwrite' | 'insert' ; Ctrl pendant le glisser = l'autre mode
         self.drop_with_audio = False              # pose aussi le son (lié) sur la 1re piste audio déverrouillée
         self.setAcceptDrops(True)
@@ -138,6 +146,8 @@ class TimelineView(QWidget):
     def _paint_clips(self, p: QPainter) -> None:
         f0, f1 = self.vp.offset, self.vp.last_frame
         drawn = 0
+        vis: dict[str, float] = {}
+        mid = (f0 + f1) / 2
         for tid in self.rows.ids:
             y, h = self.rows.y[tid], self.rows.height(tid)
             kind = self.rows.kinds[tid]
@@ -149,6 +159,7 @@ class TimelineView(QWidget):
                 p.fillRect(rect, CLIP_COLORS.get(kind, CLIP_COLORS["video"]))
                 if kind == "audio" and xr - xl > 4:
                     self._paint_wave(p, c, xl, xr, y, h)
+                    vis[c.media] = min(vis.get(c.media, 1e18), abs((c.start + c.end) / 2 - mid))
                 if c.id in self.selection:
                     p.setPen(QPen(SELECTED, 2))
                     p.drawRect(rect.adjusted(1, 1, -1, -1))
@@ -157,6 +168,18 @@ class TimelineView(QWidget):
                     p.drawText(rect.adjusted(4, 2, -2, -2), Qt.AlignLeft | Qt.AlignTop, c.label or c.id)
                 drawn += 1
         self.stats["clips_drawn"] = drawn
+        if self.peak_service is not None:
+            order = sorted(vis, key=vis.get)                       # les rushes au centre de l'écran d'abord
+            if order != self._visible_media:
+                self._visible_media = order
+                self.peak_service.want(order)
+
+    def _peaks_changed(self, media: str) -> None:
+        """Une tranche de forme d'onde est arrivée : on jette les images de ce rush et on redessine (regroupé, pas un dessin par tranche)."""
+        for k in [k for k in self._wave_cache if k[0] == media]:
+            del self._wave_cache[k]
+        if not self._wave_timer.isActive():
+            self._wave_timer.start()
 
     def _paint_wave(self, p: QPainter, c: Clip, xl: float, xr: float, y: int, h: int) -> None:
         pyr: PeakPyramid | None = self.peaks_provider(c.media)
@@ -166,7 +189,9 @@ class TimelineView(QWidget):
         n = x1 - x0
         if n <= 0:
             return
-        whole = xl >= 0 and xr <= self.width()                    # plan entièrement visible : son image ne dépend pas du pan
+        t_end = c.src_in + c.duration / self.tl.fps
+        covered = pyr.covers(t_end)                               # calcul terminé, ou déjà lu jusqu'à la fin du plan
+        whole = xl >= 0 and xr <= self.width() and covered        # image mise en cache seulement si elle est définitive
         key = (c.media, c.src_in, c.duration, round(self.vp.zoom, 6), h, int(xr) - int(xl))
         if whole and key in self._wave_cache:
             p.drawImage(int(xl), y, self._wave_cache[key])
@@ -187,6 +212,10 @@ class TimelineView(QWidget):
             p.drawImage(int(xl), y, qi)
         else:
             p.drawImage(x0, y, qi)
+            if not covered:                                       # partie pas encore calculée : fine ligne médiane + pointillé
+                done_x = int(self.vp.x_of(c.start + (pyr.duration - c.src_in) * self.tl.fps))
+                p.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt.DotLine))
+                p.drawLine(max(x0, done_x), y + h // 2, x1, y + h // 2)
 
     def _paint_ghost(self, p: QPainter) -> None:
         d = self._drag

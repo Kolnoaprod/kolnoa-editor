@@ -13,12 +13,22 @@ BIN_S = 0.02                       # un pic par 20 ms au niveau 0
 class PeakPyramid:
     """Niveau 0 : 1 crête (0..255) par 20 ms ; niveau k : maximum de 2**k crêtes du niveau 0."""
 
-    def __init__(self, base: np.ndarray):
+    def __init__(self, base: np.ndarray, complete: bool = True, revision: int = 0):
+        self.complete = complete          # False : calcul en cours, seule la partie déjà lue est remplie
+        self.revision = revision          # change à chaque nouvelle tranche (invalide les images en cache)
         self.levels = [np.asarray(base, dtype=np.uint8)]
         while len(self.levels[-1]) > 64:
             a = self.levels[-1]
             n = len(a) // 2 * 2
             self.levels.append(np.maximum(a[:n:2], a[1:n:2]))
+
+    @property
+    def nbytes(self) -> int:
+        return sum(a.nbytes for a in self.levels)
+
+    def covers(self, t: float) -> bool:
+        """Les crêtes sont-elles disponibles jusqu'à la seconde `t` (ou le calcul est-il terminé) ?"""
+        return self.complete or t <= self.duration
 
     @property
     def duration(self) -> float:
@@ -47,10 +57,18 @@ def load_peaks(media_path: str | Path, max_seconds: float = 4 * 3600) -> PeakPyr
                              timeout=600).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    x = np.frombuffer(raw, dtype=np.float32)
-    per = int(8000 * BIN_S)
-    n = len(x) // per
+    bins = samples_to_bins(np.frombuffer(raw, dtype=np.float32))
+    return PeakPyramid(bins) if len(bins) else None
+
+
+SAMPLE_RATE = 8000
+BIN_SAMPLES = int(SAMPLE_RATE * BIN_S)
+
+
+def samples_to_bins(x: np.ndarray) -> np.ndarray:
+    """Échantillons mono 8 kHz (float) → une crête 0..255 par tranche de 20 ms (les échantillons en trop sont ignorés)."""
+    n = len(x) // BIN_SAMPLES
     if n == 0:
-        return None
-    pk = np.abs(x[: n * per]).reshape(n, per).max(axis=1)
-    return PeakPyramid(np.minimum(255, np.round(pk * 255)).astype(np.uint8))
+        return np.zeros(0, dtype=np.uint8)
+    pk = np.abs(x[: n * BIN_SAMPLES]).reshape(n, BIN_SAMPLES).max(axis=1)
+    return np.minimum(255, np.round(pk * 255)).astype(np.uint8)

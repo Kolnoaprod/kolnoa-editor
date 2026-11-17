@@ -41,3 +41,25 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
 - **Au dépôt : toujours revalidé** — jamais de cache, essai sur la copie COMPLÈTE, puis `Session.do` revalide encore (atomique). Test : aperçu en cache périmé + piste verrouillée → refus.
 - Dépôt = UNE transaction (annulable d'un geste). Tests : `tests/test_bin_drag.py` (événements Qt réels de glisser/déposer inclus).
 
+## 4. Formes d'onde asynchrones (PR formes d'onde)
+- `ui/peak_service.py` : `PeakService.get(media)` **ne bloque jamais** (pyramide complète, partielle ou None) ; le calcul tourne dans 2 fils
+  (ffmpeg décode en flux, une pyramide partielle est publiée toutes les ~10 s de média) → l'onde se remplit de gauche à droite.
+- Priorité : `want([...])` (rushs visibles, les plus proches du centre de l'écran d'abord) passe devant la file.
+- Cache disque : un `.npy` par rush, clé = chemin + taille + date + version, écriture atomique (`.tmp` + `os.replace`), cache abîmé → recalcul,
+  rush modifié → nouvelle clé. Un rush sans audio est mémorisé. Le média source n'est jamais touché.
+- Vue : `TimelineView(peak_service=...)` ; une tranche reçue invalide les images du rush et déclenche UN redessin regroupé (80 ms) ; une image d'onde n'est mise en
+  cache que si elle est **définitive** (calcul terminé ou plan entièrement couvert) ; la partie non calculée = ligne médiane pointillée. Le chemin de dessin
+  du pan/zoom ne change pas (mêmes caches par plan) → fluidité conservée.
+- Arrêt propre : `close()` annule et tue ffmpeg (< 2 s). Tests : `tests/test_peak_service.py` (progressif, priorité, cache, corruption, annulation, fluidité du dessin
+  pendant le calcul sur 480 plans / 8 pistes : médiane ~3 ms, p95 ~6 ms dans le bac à sable, rendu logiciel).
+
+### Revue #23 — rush modifié, mémoire plafonnée, purge du cache disque
+- **Rush modifié pendant la session** : chaque pyramide mémorise la signature du fichier (taille + date) prise AU DÉBUT du calcul ; `get()` re-vérifie au plus 1×/s
+  (`recheck_s`). Changement → pyramide jetée (jamais servie périmée), état « sans audio » oublié (un nouvel export avec son est revu), onde redessinée.
+  Modifié **pendant** le calcul : le résultat est jeté (`discarded_stale`), le rush est recalculé sur le nouveau fichier ; la clé du cache disque vient de la signature
+  de DÉBUT, donc l'ancienne version n'est jamais écrite sous la clé de la nouvelle. `invalidate(media)` pour l'appelant qui sait (re-synchro, remplacement de rush).
+- **Mémoire** : plafond LRU (`max_ram_bytes`, 128 Mo par défaut ≈ 1,3 M s de média) ; le moins récemment utilisé est évincé, **jamais** un rush visible (`want`) ni en calcul ;
+  un rush évincé qui revient est relu du disque (pas recalculé).
+- **Cache disque** : `purge_cache()` (lancée en arrière-plan au démarrage) supprime les `.tmp` abandonnés (> 1 h), les entrées non utilisées depuis 90 jours puis les plus
+  anciennes au-delà de 1 Go ; un accès (`utime`) rafraîchit une entrée ; ne touche qu'aux `*.npy`/`*.tmp` du dossier de cache.
+- Tests (8 de plus) : modification en session, pendant le calcul, muet → avec son, invalidation explicite, plafond/LRU/visible protégé, purge âge/taille/tmp, purge au démarrage non bloquante.
