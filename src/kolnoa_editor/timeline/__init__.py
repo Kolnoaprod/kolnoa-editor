@@ -2,7 +2,7 @@
 
 from .convert import TimelineExportError, from_decision_list, to_decision_list
 from .editing import (delete_range, link_clips, linked_ids, move_clips, place_clip, razor, replace_clip, ripple_trim,
-                      roll_trim, snap_frame, snap_move, snap_points, trim_edge, trim_limits, unlink_clips)
+                      ripple_edge, ripple_limits, roll_trim, snap_frame, snap_move, snap_points, trim_edge, trim_limits, unlink_clips)
 from .multicam_live import angle_for_key, clip_at, cut_to_angle, key_angles, record_angle_switches
 from .audio_edit import (add_crossfade, assign_master, clear_master, master_at, remove_crossfade, reset_channels,
                          set_audio_settings, set_clip_gain, set_fades, set_strip, set_track_audio, to_dual_mono, to_mono,
