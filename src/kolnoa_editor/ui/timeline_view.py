@@ -67,6 +67,9 @@ class TimelineView(QWidget):
 
     def refresh_model(self) -> None:
         """À appeler après toute modification du modèle (le widget ne garde aucune copie des plans)."""
+        self._rev = getattr(self, "_rev", 0) + 1                      # invalide les validations de dépôt mises en cache
+        self._drop_cache = {}
+        self._snap_pts = None
         self.rows = L.Rows(self.tl)
         self.index = L.ClipIndex(self.tl)
         self.selection = [c for c in self.selection if any(k.id == c for k in self.tl.clips)]
@@ -368,15 +371,33 @@ class TimelineView(QWidget):
         self.update()
 
     # --- dépôt depuis le chutier -----------------------------------------------------------------------------
-    def plan_drop(self, payload: dict, x: float, y: float, ctrl: bool = False):
+    def _snap_points(self) -> list[int]:
+        if self._snap_pts is None:
+            self._snap_pts = snap_points(self.tl)                     # sans tête de lecture : elle bouge sans changer le modèle
+        return self._snap_pts
+
+    def _snap_drop(self, frame: int, thr: int) -> int:
+        """Aimante sur les bords/repères/tête de lecture par dichotomie (O(log n)) au lieu de balayer tous les points à chaque souris."""
+        from bisect import bisect_left
+        pts = self._snap_points()
+        i = bisect_left(pts, frame)
+        cands = [p for p in (pts[i - 1] if i > 0 else None, pts[i] if i < len(pts) else None, self.playhead, 0) if p is not None]
+        best = min(cands, key=lambda p: (abs(p - frame), p))
+        return best if abs(best - frame) <= thr else frame
+
+    def plan_drop(self, payload: dict, x: float, y: float, ctrl: bool = False, exact: bool = False):
         """Évalue un dépôt SANS rien modifier : renvoie un dict {ok, reason, track, start, frames, mode, tx}.
-        La validité vient du moteur lui-même (essai sur une copie) : pistes verrouillées, type de piste, chevauchements, ripple."""
+        La validité vient du moteur (essai de la transaction) : pistes verrouillées, type de piste, chevauchements, ripple.
+        Aperçu (`exact=False`) : essai sur une copie LIMITÉE aux pistes concernées (`scoped_copy`) et résultat mis en cache par
+        (charge, piste, image, mode) tant que le modèle ne change pas. Dépôt (`exact=True`) : jamais de cache, essai sur la copie COMPLÈTE,
+        puis `Session.do` revalide encore à l'application."""
         mode = {"overwrite": "insert", "insert": "overwrite"}[self.drop_mode] if ctrl else self.drop_mode
         tid = self.rows.track_at(y)
         res = {"ok": False, "reason": "", "track": tid, "start": 0, "frames": 1, "mode": mode, "tx": None, "audio_track": None}
         if tid is None:
             res["reason"] = "dépose sur une piste"
             return res
+        ckey = None
         try:
             if "sub" in payload:
                 b = self.tl.subclip(payload["sub"])
@@ -385,8 +406,13 @@ class TimelineView(QWidget):
                 length, kind = float(payload["length"]), payload.get("kind", "video")
             frames = max(1, round(length * self.tl.fps))
             raw = max(0, round(self.vp.frame_of(x)))
-            start = snap_frame(raw, snap_points(self.tl, playhead=self.playhead), max(1, round(SNAP_PX / self.vp.zoom)))
+            start = self._snap_drop(raw, max(1, round(SNAP_PX / self.vp.zoom)))
             res.update(start=max(0, start), frames=frames)
+            ckey = (payload.get("sub") or (payload.get("media"), payload.get("length"), payload.get("src_in")), tid, res["start"], mode,
+                    self.drop_with_audio, self._rev)
+            if not exact and ckey in self._drop_cache:
+                self.stats["drop_cache_hits"] = self.stats.get("drop_cache_hits", 0) + 1
+                return {**self._drop_cache[ckey]}
             if self.tl.track(tid).locked:
                 raise TimelineError(f"la piste {tid} est verrouillée")
             if self.tl.track(tid).kind != kind:
@@ -400,10 +426,15 @@ class TimelineView(QWidget):
             else:
                 tx = place_rush(self.tl, payload["media"], length, tid, res["start"], float(payload.get("src_in", 0.0)), mode,
                                 audio_track, None, kind, payload.get("name", ""), self.source_len(payload["media"]))
-            execute(self.tl.copy(), tx)                     # essai complet sur une copie : le modèle réel n'est jamais touché
+            trial = self.tl.copy() if exact else self.tl.scoped_copy([tid] + ([audio_track] if audio_track else []))
+            execute(trial, tx)                              # le modèle réel n'est jamais touché
             res.update(ok=True, tx=tx)
         except TimelineError as err:
             res["reason"] = str(err)
+        if not exact and ckey is not None:
+            if len(self._drop_cache) > 256:
+                self._drop_cache.clear()
+            self._drop_cache[ckey] = {**res}
         return res
 
     def dragEnterEvent(self, e):
@@ -431,7 +462,7 @@ class TimelineView(QWidget):
     def dropEvent(self, e):
         pl = dnd.decode(e.mimeData())
         pos = e.position()
-        plan = self.plan_drop(pl, pos.x(), pos.y(), bool(e.modifiers() & Qt.ControlModifier)) if pl else None
+        plan = self.plan_drop(pl, pos.x(), pos.y(), bool(e.modifiers() & Qt.ControlModifier), exact=True) if pl else None
         self._drop = None
         self._drop_payload = None
         self.update()

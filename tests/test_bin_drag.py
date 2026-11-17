@@ -1,6 +1,7 @@
 """Glisser depuis le chutier : aperçu avant dépôt, pistes verrouillées, insertion/recouvrement, rush brut, une seule annulation."""
 
 import os
+import time
 
 import pytest
 
@@ -161,3 +162,114 @@ def test_corrupt_payload_is_ignored_and_bin_view_lists_subclips(qapp, tmp_path):
     v = make(tmp_path)
     b = BinView(v.session)
     assert b.count() == 2 and b.payload_for(b.item(0)) == {"sub": "b001"}
+
+
+# --- revue #22 : essai limité aux pistes concernées, cache, revalidation au dépôt, perf sur gros montages ---------
+import random
+
+
+
+def test_scoped_copy_is_independent_and_keeps_cross_track_rules(qapp, tmp_path):
+    v = make(tmp_path)
+    tl = v.tl
+    sc = tl.scoped_copy(["V1"])
+    assert {c.track for c in sc.clips} == {"V1"} and len(sc.tracks) == len(tl.tracks)
+    sc.clip("c1").start = 999
+    sc.clip("c1").extra["x"] = 1
+    assert tl.clip("c1").start == 100 and "x" not in tl.clip("c1").extra          # copie indépendante
+    tl.track("V2").locked = True
+    assert {c.track for c in tl.scoped_copy(["V1"]).clips} == {"V1", "V2"}        # une piste verrouillée garde ses plans (règles de ripple)
+
+
+def _rand_drop_plans(v, rnd, n):
+    out = []
+    for _ in range(n):
+        v.drop_mode = rnd.choice(["overwrite", "insert"])
+        v.drop_with_audio = rnd.random() < 0.4
+        tr = rnd.choice(["V1", "V2", "A1", "A2"])
+        x, y = pos(v, tr, rnd.randint(0, 600))
+        out.append(((tr, round(v.vp.frame_of(x)), v.drop_mode, v.drop_with_audio), x, y))
+    return out
+
+
+def test_scoped_preview_verdict_equals_full_copy_verdict_on_random_drops(qapp, tmp_path):
+    rnd = random.Random(7)
+    for variant in range(4):
+        v = make(tmp_path / f"v{variant}")
+        if variant == 1:
+            v.tl.track("A1").locked = True
+        if variant == 2:
+            v.tl.clip("m1").locked = True
+        if variant == 3:
+            v.tl.track("V2").locked = True
+        for payload in ({"sub": "b001"}, {"sub": "b002"}, {"media": "r/c.mp4", "length": 6.0, "src_in": 1.0, "kind": "video"}):
+            for key, x, y in _rand_drop_plans(v, rnd, 60):
+                fast = v.plan_drop(payload, x, y)
+                exact = v.plan_drop(payload, x, y, exact=True)
+                assert fast["ok"] == exact["ok"], (variant, payload, key, fast["reason"], exact["reason"])
+                if fast["ok"]:                                                   # même résultat de montage
+                    a, b = v.tl.copy(), v.tl.copy()
+                    execute(a, fast["tx"]); execute(b, exact["tx"])
+                    assert a.canonical() == b.canonical()
+
+
+def test_equivalent_validations_are_cached_and_model_change_invalidates(qapp, tmp_path):
+    v = make(tmp_path)
+    x, y = pos(v, "V2", 400)
+    v.plan_drop({"sub": "b001"}, x, y)
+    h0 = v.stats.get("drop_cache_hits", 0)
+    for _ in range(5):
+        v.plan_drop({"sub": "b001"}, x + 0.2, y + 1)                       # même image/piste/mode : même verdict, pas de nouvel essai
+    assert v.stats["drop_cache_hits"] - h0 == 5
+    v.plan_drop({"sub": "b001"}, x + 40, y)                                # autre image : nouvel essai
+    assert v.stats["drop_cache_hits"] - h0 == 5
+    v.session.do(v.plan_drop({"sub": "b001"}, x, y, exact=True)["tx"], "dépôt")
+    v.refresh_model()                                                      # le modèle a changé : le cache est jeté
+    assert v._drop_cache == {}
+
+
+def test_drop_always_revalidates_exactly_even_if_the_preview_cache_is_stale(qapp, tmp_path):
+    v = make(tmp_path)
+    v.show()
+    mime = dnd.encode({"sub": "b001"})
+    x, y = pos(v, "V2", 300)
+    p = QPoint(int(x), int(y))
+    qapp.sendEvent(v, QDragEnterEvent(p, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier))
+    qapp.sendEvent(v, QDragMoveEvent(p, Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier))
+    assert v._drop["ok"]
+    v.tl.track("V2").locked = True                                         # le modèle change SANS refresh_model : l'aperçu en cache est périmé
+    before = len(v.tl.clips)
+    msgs = []
+    v.rejected.connect(msgs.append)
+    qapp.sendEvent(v, QDropEvent(QPointF(p), Qt.CopyAction, mime, Qt.LeftButton, Qt.NoModifier))
+    assert len(v.tl.clips) == before and msgs and "verrouill" in msgs[0]    # le dépôt revalide : refus, rien n'est écrit
+
+
+def _big(tmp_path, n, ntracks=20):
+    tl = Timeline(title="T", fps=FPS, tracks=[Track(f"V{i}", "video") for i in range(ntracks // 2)] +
+                  [Track(f"A{i}", "audio") for i in range(ntracks // 2)])
+    per = n // ntracks
+    for ti, t in enumerate(tl.tracks):
+        for i in range(per):
+            tl.clips.append(Clip(f"c{ti}_{i}", t.id, "r/a.mp4", i * 130, 100, src_in=float(i % 50)))
+    execute(tl, mark_subclip(tl, "r/b.mp4", 5.0, 9.0, "E", source_len=60.0))
+    s = Session.create(tmp_path / f"big{n}", tl)
+    v = TimelineView(s, source_len=lambda m: 100.0)
+    v.resize(1400, v.rows.total_h + 4)
+    v.vp.zoom = 1.0
+    return v
+
+
+@pytest.mark.parametrize("n", [5000, 10000])
+def test_plan_drop_p95_on_large_projects(qapp, tmp_path, n):
+    v = _big(tmp_path, n)
+    ts = []
+    for i in range(80):                                                    # 80 positions DIFFÉRENTES : aucun coup de cache
+        x, y = 200 + i * 11, v.rows.y["V0" if i % 2 else "V3"] + 10
+        t0 = time.perf_counter()
+        r = v.plan_drop({"sub": "b001"}, x, y)
+        ts.append((time.perf_counter() - t0) * 1000)
+    ts.sort()
+    med, p95 = ts[len(ts) // 2], ts[int(len(ts) * .95)]
+    print(f"[perf] plan_drop {n} plans : médiane {med:.1f} ms, p95 {p95:.1f} ms, max {ts[-1]:.1f} ms")
+    assert r["ok"] and p95 < 40                                            # avant correction : ~160 ms (5 000) et ~360 ms (10 000)

@@ -62,6 +62,14 @@ class AudioStrip:
     name: str = ""
 
 
+def _clone_clip(c: "Clip") -> "Clip":
+    """Copie indépendante d'un plan, bien plus rapide que `deepcopy` (champs simples recopiés, listes/dicts internes dupliqués)."""
+    n = copy.copy(c)
+    n.extra = copy.deepcopy(c.extra) if c.extra else {}
+    n.strips = [copy.copy(b) for b in c.strips] if c.strips is not None else None
+    return n
+
+
 @dataclass
 class Clip:
     id: str
@@ -477,6 +485,19 @@ class Timeline:
     # --- (dé)sérialisation ---------------------------------------------
     def copy(self) -> "Timeline":
         return copy.deepcopy(self)
+
+    def scoped_copy(self, track_ids) -> "Timeline":
+        """Copie profonde LIMITÉE aux plans des pistes données (+ pistes verrouillées, + plans cités par un fondu enchaîné) ; le reste
+        (pistes, groupes, chutier, réglages audio…) est copié en entier. Sert aux essais « et si ? » : coût ∝ pistes concernées, pas
+        ∝ taille du montage. Les règles qui regardent d'autres pistes (désynchronisation d'une piste verrouillée, fondus enchaînés) y restent valables."""
+        keep = set(track_ids) | {t.id for t in self.tracks if t.locked}
+        xf = {i for x in self.crossfades for i in (x.left, x.right)}
+        clips = [c for c in self.clips if c.track in keep or c.id in xf]
+        shell = copy.copy(self)
+        shell.clips = []
+        new = copy.deepcopy(shell)
+        new.clips = [_clone_clip(c) for c in clips]
+        return new
 
     def to_dict(self) -> dict:
         d = asdict(self)

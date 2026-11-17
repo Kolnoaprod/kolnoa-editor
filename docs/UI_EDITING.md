@@ -31,6 +31,11 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
 - Aperçu avant dépôt : fantôme vert (valide) / rouge (refusé, avec la raison), trait bleu = insertion. Aimantation sur bords, repères, tête de lecture.
 - Modes : `drop_mode` (`overwrite` par défaut, ou `insert`), **Ctrl pendant le glisser inverse le mode**. L'insertion décale la suite de la piste visée seulement
   (pas des autres pistes ; le moteur refuse de désynchroniser une piste verrouillée). `drop_with_audio=True` pose aussi le son lié sur la 1re piste audio déverrouillée.
+- **Perf de l'aperçu (revue)** : l'essai ne copie plus toute la timeline. `Timeline.scoped_copy(pistes)` ne duplique que les plans des pistes concernées
+  (+ pistes verrouillées + plans cités par un fondu enchaîné, pour que les règles inter-pistes restent justes) avec un clonage de plan rapide ; le verdict est mis en
+  cache par (charge, piste, image, mode, revision du modèle) ; l'aimantation se fait par dichotomie. Mesuré (bac à sable) : 5 000 plans **~160 → ~4 ms** (p95), 10 000 plans **~360 → ~6 ms** (p95).
+  Un test compare le verdict « copie limitée » au verdict « copie complète » sur des centaines de dépôts aléatoires (verrous, modes, son lié, rush brut) : identiques.
+- **Au dépôt : toujours revalidé** — jamais de cache, essai sur la copie COMPLÈTE, puis `Session.do` revalide encore (atomique). Test : aperçu en cache périmé + piste verrouillée → refus.
 - Dépôt = UNE transaction (annulable d'un geste). Tests : `tests/test_bin_drag.py` (événements Qt réels de glisser/déposer inclus).
 =======
 =======

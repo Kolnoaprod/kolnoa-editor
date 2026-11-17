@@ -88,7 +88,7 @@ def _place(tl: Timeline, b, track: str, start: int, mode: str, audio_track: str 
     link = ids.link() if audio_track else None
     vid = Clip(ids.clip(), track, b.media, start, frames, b.src_in, audio="source" if not audio_track else "mute",
                label=b.name, link=link)
-    work = tl.copy()
+    work = tl.scoped_copy([track, *([audio_track] if audio_track else []), *(ripple_tracks or [])])   # essai sur les pistes concernées seulement
     first = place_clip(work, vid, mode, ripple_tracks, ids)
     execute(work, first)
     parts = [first]
