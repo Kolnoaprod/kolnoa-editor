@@ -20,8 +20,10 @@ class FakeBackend:
     """Simule un décodeur : seek = latence `seek_s` avant qu'une image soit prête ; lecture à vitesse réelle ± `speed_err`.
     Le temps vient de `clock_fn` (le même faux temps que l'horloge maître)."""
 
-    def __init__(self, now, seek_s: float = 0.15, speed_err: float = 0.0, duration: float = 1e9):
+    def __init__(self, now, seek_s: float = 0.15, speed_err: float = 0.0, duration: float = 1e9, lag: bool = False):
         self.now, self.seek_s, self.speed_err, self.duration = now, seek_s, speed_err, duration
+        self.lag = lag                  # True : position() ne change qu'à la fin du seek (comme un vrai décodeur asynchrone)
+        self._landing = None            # (instant d'arrivée, position)
         self.path = None
         self.quality = None
         self.priority = 9
@@ -41,12 +43,17 @@ class FakeBackend:
 
     def _sync(self):
         t = self.now()
+        if self._landing and t >= self._landing[0]:
+            self._pos, self._wall, self._landing = self._landing[1], self._landing[0], None
         self._pos += (t - self._wall) * self._rate * (1.0 + self.speed_err)
         self._wall = t
 
     def seek(self, t):
         self._sync()
-        self._pos = t
+        if self.lag:
+            self._landing = (self.now() + self.seek_s, t)
+        else:
+            self._pos = t
         self._ready_at = self.now() + self.seek_s
         self.log.append(("seek", round(t, 3)))
 

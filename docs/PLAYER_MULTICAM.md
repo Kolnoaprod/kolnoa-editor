@@ -29,6 +29,15 @@ Ordre de la revue : #9 → #13 → #14 → #16 → #18 → **cette PR** (empilé
 - **Benchmarks séparés** (`tools/bench/bench_player.py`) : `seek` (setPosition → première image), `decode` (images/s à 4×, sans écran), `display`
   (conversion image + peinture, images sautées). `gen` fabrique 3 rushes 4K50 synthétiques. `hwcheck.py` : FFmpeg et Qt avec/sans GPU + colonne `dec` de nvidia-smi.
 
+## Corrections de revue (ChatGPT)
+- **Cadence de rafraîchissement = temps RÉEL, tolérance = temps MÉDIA.** Un angle « en pause » pendant la lecture est ré-aligné au plus toutes les 0,5 s *réelles*
+  (le coût de décodage ne dépend pas de la vitesse de lecture) ; avant, la cadence suivait le temps média et explosait à 4×. Horloge en pause : anti-rafale 0,1 s réelles.
+- **Seeks successifs / pauses** : chaque seek émis est « en vol » 0,6 s (ou jusqu'à l'atterrissage) ; pas de seek par-dessus un seek en vol ; un seek utilisateur écrase
+  toujours le précédent (le dernier gagne). `FakeBackend(lag=True)` simule des seeks asynchrones (position qui n'arrive que plus tard). Tests : 3 seeks à 30 ms → tous les angles sur la dernière cible, pas de tempête de seeks.
+- **Budget jamais dépassé en silence** : `plan()` renvoie un `Plan` (liste de `Slot` + `spent`, `budget`, `over_budget`, `missing_proxy`, `warnings`). Angle actif sans proxy dont la
+  source dépasse le budget → dépassement **déclaré** ; angle non actif sans proxy et sans budget → PAUSED (jamais lu en 4K en continu) + avertissement. Le contrôleur expose
+  `warnings`/`report` et compte `stats.over_budget_replans` (à afficher dans l'interface).
+
 ## Mesures du bac à sable (Linux, **sans GPU**, rendu logiciel — ne valent PAS pour la RTX A4500)
 4K50 H.264 synthétique : seek médiane ~117 ms, p95 ~190 ms ; décodage logiciel 3 flux 4K à 4× : 64–76 i/s par flux (donc > 50 i/s : tient 3×4K50 en logiciel
 ici) ; affichage : **`frame.toImage()` sur du 4K coûte ~22 ms (1 flux) à ~41 ms (3 flux) en CPU** — c'est le vrai coût, pas la peinture (0,6 ms).
