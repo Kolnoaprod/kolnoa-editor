@@ -27,11 +27,12 @@ def frames_of(tl, clips, lo_of, to_axis, eps, window=None):
 
 
 def point_matches(tl, clips, us, to_axis, eps=F(1, 2)):
-    hits = [(c, f) for c, f, a, b in frames_of(tl, clips, None, to_axis, eps, (us, us)) if a - eps <= us < b - eps]
+    hits = [(c, f, a, b) for c, f, a, b in frames_of(tl, clips, None, to_axis, eps, (us, us)) if a - eps <= us < b - eps]
     keep = []
-    for c, f in hits:
-        # coupe : si l'image est la dernière d'un plan et que l'image 0 du plan suivant (même piste) est aussi touchée → droite gagne
-        if f == c.duration - 1 and any(c2.track == c.track and c2.start == c.end and f2 == 0 for c2, f2 in hits):
+    for c, f, a, b in hits:
+        # coupe : dernière image d'un plan + image 0 du plan suivant (même piste) CONTIGU dans la source, tous deux touchés → droite gagne
+        if f == c.duration - 1 and any(c2.track == c.track and c2.start == c.end and f2 == 0 and abs(a2 - b) <= F(THRESH_US, 10)
+                                       for c2, f2, a2, b2 in hits):
             continue
         keep.append((c, f))
     return keep
