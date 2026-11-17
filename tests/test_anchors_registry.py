@@ -224,3 +224,36 @@ def test_project_registry_path(tmp_path):
     from kolnoa_editor.project import Project
     pr = Project(tmp_path, data_dir=tmp_path / "d")
     assert pr.media_registry_path == tmp_path / "d" / "media_registry.json"
+
+
+def test_same_metadata_different_fingerprint_is_replacement():
+    r = MediaRegistry()
+    old = reg(r, "a.mov", size=1000, mtime=1, quick_hash="H1")
+    new = reg(r, "a.mov", size=1000, mtime=1, quick_hash="H2")        # copie/restauration préservant taille+mtime
+    assert new.media_id != old.media_id and r.get(old.media_id).status == "remplacé"
+
+
+def test_same_metadata_matching_fingerprint_raises_trust_only():
+    r = MediaRegistry()
+    a = reg(r, "a.mov", quick_hash="H1")
+    assert a.trust == "metadonnees"
+    b = reg(r, "a.mov", quick_hash="H1")
+    assert b.media_id == a.media_id and b.trust == "empreinte"
+
+
+def test_same_metadata_without_fingerprint_stays_metadata_trust():
+    r = MediaRegistry()
+    a = r.register("a.mov", 10, 1)
+    assert r.register("a.mov", 10, 1).media_id == a.media_id and a.trust == "metadonnees"
+
+
+def test_register_is_atomic_when_id_collides():
+    ids = iter(["id-1", "id-2", "id-1"])
+    r = MediaRegistry(id_factory=lambda: next(ids))
+    old = reg(r, "a.mov", size=1000, mtime=1)
+    reg(r, "b.mov", size=5)
+    snap = {k: dict(vars(v)) for k, v in r.entries.items()}
+    with pytest.raises(RegistryError):
+        reg(r, "a.mov", size=2000, mtime=2)                           # remplacement dont l'id collisionne
+    assert {k: dict(vars(v)) for k, v in r.entries.items()} == snap
+    assert r.get(old.media_id).status == "present"

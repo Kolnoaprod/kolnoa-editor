@@ -5,7 +5,8 @@ Règles (voir docs/A1_ANCRES_PROPOSITION.md §2) :
   - Le chemin (`path_rel`) est un INDICE mutable ; l'historique des chemins est conservé (`locations`).
   - Un hash partiel (`quick_hash` : 3 Mio échantillonnés) n'est JAMAIS une preuve d'identité : il ne sert qu'à PROPOSER un
     rapprochement. Un déplacement n'est appliqué que par `confirm_relink` (décision humaine), jamais par `register`.
-  - Même chemin + même taille + même mtime ⇒ même média (preuve d'usage). Même chemin mais contenu changé ⇒ NOUVEAU media_id,
+  - Même chemin + même taille + même mtime ⇒ même média, confiance `metadonnees` (un remplacement qui préserve ces trois valeurs passe
+    inaperçu) ; si les deux empreintes partielles existent et DIFFÈRENT ⇒ remplacement ; si elles concordent ⇒ confiance `empreinte`. Même chemin mais contenu changé ⇒ NOUVEAU media_id,
     l'ancien passe en « remplacé » (ses ancres restent lisibles et deviennent `perdue`, jamais réassignées en silence).
   - Ce module ne lit ni n'écrit jamais un média : il ne reçoit que des métadonnées (taille, mtime, durée, cadence).
   - Écriture atomique (fichier temporaire voisin + remplacement). Un fichier corrompu est REFUSÉ, jamais réinitialisé en silence.
@@ -55,6 +56,8 @@ class MediaEntry:
     locations: list[str] = field(default_factory=list)   # historique des chemins (le dernier = path_rel)
     status: str = PRESENT
     confirmed_by: str = "auto-chemin"   # 'auto-chemin' | 'utilisateur'
+    trust: str = "metadonnees"          # 'metadonnees' (chemin+taille+mtime : un remplacement qui les préserve passe inaperçu)
+                                        # | 'empreinte' (en plus, l'empreinte partielle concorde — toujours pas une preuve)
 
     @property
     def fps_fraction(self) -> Fraction | None:
@@ -150,19 +153,25 @@ class MediaRegistry:
         - chemin inconnu : nouveau `media_id`. JAMAIS d'assimilation à un autre média sous un autre chemin (voir `propose_relink`)."""
         path_rel = path_rel.replace("\\", "/")
         cur = next((e for e in self.entries.values() if e.path_rel == path_rel and e.status == PRESENT), None)
-        if cur is not None:
-            if (cur.size, cur.mtime_ns) == (size, mtime_ns):
+        if cur is not None and (cur.size, cur.mtime_ns) == (size, mtime_ns):
+            if cur.quick_hash is not None and quick_hash is not None and cur.quick_hash != quick_hash:
+                pass                                 # métadonnées identiques mais contenu différent : remplacement qui préserve taille+mtime
+            else:
                 cur.kind = kind or cur.kind
                 for name, val in (("duration_us", duration_us), ("fps", fps), ("quick_hash", quick_hash)):
                     if val is not None:
                         setattr(cur, name, val)
                 cur.vfr = cur.vfr or vfr
+                if cur.quick_hash is not None and quick_hash is not None:
+                    cur.trust = "empreinte"
                 return cur
-            cur.status = REPLACED
+        # remplacement ou nouveau média : tout est vérifié AVANT toute mutation (un échec ne laisse jamais le registre à moitié modifié)
         entry = MediaEntry(media_id=self._new_id(), path_rel=path_rel, size=size, mtime_ns=mtime_ns, kind=kind,
                            duration_us=duration_us, fps=fps, vfr=vfr, quick_hash=quick_hash, locations=[path_rel])
         if entry.media_id in self.entries:
             raise RegistryError("id_factory a produit un media_id déjà utilisé")
+        if cur is not None:
+            cur.status = REPLACED
         self.entries[entry.media_id] = entry
         return entry
 
