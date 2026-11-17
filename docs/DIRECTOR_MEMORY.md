@@ -1,8 +1,8 @@
 # Mémoire de réalisation (« Director Memory ») — état des lieux, architecture, plan
 
-Statut : **proposition à valider par ChatGPT et le réalisateur avant toute implémentation.** Cette PR contient ce document et un
-**prototype jetable en lecture seule** (livrable 4 du cahier des charges) qui sert à valider le *format* du profil, pas à fonder le produit.
-Rien n'est fusionné. Dépôt public : aucun nom de client ni de film ; on parle du « film de référence A ».
+Statut : **plan révisé après la revue de ChatGPT et les arbitrages du réalisateur ; aucune implémentation du produit avant son accord explicite.**
+Cette PR contient ce document et un **prototype expérimental isolé en lecture seule** (`kolnoa_editor/experimental/memory_proto/`) :
+oracle de tests et banc de comparaison, **pas** le moteur de production (voir §1 bis). Rien n'est fusionné. Dépôt public : aucun nom de client ni de film ; on parle du « film de référence A ».
 
 Principe directeur du cahier des charges, repris tel quel : **d'abord une mémoire explicite, mesurable et vérifiable**, pas un système d'apprentissage complexe. Un profil est un fichier de règles et de statistiques lisibles, avec leur provenance, que le réalisateur peut ouvrir, corriger, désactiver et supprimer. Aucun réentraînement de modèle.
 
@@ -16,7 +16,7 @@ Ce document prolonge `PROMPTS_ASSISTANT.md` (PR #25) : consignes ancrées au con
 | **Comparer la proposition avec ce que l'utilisateur a validé** (§4) | Le **journal de session** conserve chaque opération dans l'ordre, annulations comprises : c'est exactement la matière des corrections | rien ne distingue aujourd'hui une opération générée d'une opération manuelle ; il faut les étiqueter (propositions de la PR #25, PR E/G) |
 | Rythme : durées de plans, fréquence des changements | `Clip.start/duration`, `Clip.group/angle` (un changement d'angle = deux plans contigus du même groupe, angles différents) | aucune statistique n'est calculée |
 | Choix d'angles indépendants du numéro de caméra | `Angle`, `MulticamGroup`, statut/confiance de synchro, touches 1–9 | pas de **rôle d'angle** (large / moyen / serré / drone / réactions) : le numéro physique est la seule identité |
-| Plans de coupe | pistes (`Track.role`), `Subclip` + `tags` du chutier, `place_subclip`, `search_bin` | **pas de « bibliothèque intelligente de rushes »** ni de plans extraits virtuellement des longues prises dans le dépôt ; le chutier n'a que des tags libres. Prérequis à clarifier avec le réalisateur |
+| Plans de coupe | pistes (`Track.role`), `Subclip` + `tags` du chutier, `place_subclip`, `search_bin` | **pas de bibliothèque intelligente** : le chutier n'a que des tags libres, sans qualité, sans rôle narratif, sans provenance. **Décision du réalisateur : PR dédiée « L » avant M6** (§2.6) |
 | Structure en grandes séquences | `Marker` de nature `chapter` (déjà dans `MARKER_KINDS`) | aucun marqueur n'est posé ni exploité ; les repères ne suivent pas les opérations (voir PR #25, §3) ; pas de taxonomie des séquences |
 | Transitions | fondus enchaînés **audio** (`Crossfade`) ; fondus de plan | **aucune transition vidéo** dans le moteur (prévue PR K de la PR #25) ; donc rien à apprendre côté image pour l'instant |
 | Ralentis | — | **aucun champ de vitesse** dans `Clip` ; non mesurable aujourd'hui |
@@ -27,6 +27,30 @@ Ce document prolonge `PROMPTS_ASSISTANT.md` (PR #25) : consignes ancrées au con
 | Films exportés sans projet natif | `from_decision_list` (une piste vidéo) | les liste de décisions donnent durées et ordre des plans, pas les angles, plans de coupe ni transitions |
 
 **Ce que le dépôt permet déjà de mesurer honnêtement** sur un projet natif, sans aucune analyse visuelle : durées de plans par séquence, fréquence des changements de caméra, fréquence et durée des plans sur pistes secondaires, durée des fondus audio, durées par séquence (si les chapitres sont posés). **Ce qui ne l'est pas** et reste hors v1 : taille de plan (large/serré), raccords de regard/mouvement, émotion, ralentis, relation à la musique, valeur « émotionnelle » d'un plan.
+
+## 1 bis. Le prototype M0 : ce qu'il est, ce qu'il mesure
+
+**Statut décidé** : outil expérimental **isolé** (`kolnoa_editor/experimental/`), utile pour valider les calculs, fabriquer des jeux de test et comparer avant/après. Un test vérifie qu'**aucun module de production ne l'importe**. Il ne deviendra pas le moteur par accumulation de fonctions : après validation sur des cas réels, on décide en M1 quelles parties sont **réimplémentées proprement**.
+
+Métriques réellement mesurées (définitions structurelles, pas sémantiques) :
+
+| Métrique | Définition exacte | Ce que ce n'est PAS |
+| --- | --- | --- |
+| Section | repère `chapter` jusqu'au repère suivant ; texte = type de séquence | une détection automatique de séquences |
+| Plan | clip d'une piste vidéo de rôle `main`, rattaché à la section où il **commence** (un plan qui déborde reste dans sa section) | un plan « cinématographique » (deux pistes `main` superposées comptent deux fois : limite connue, testée) |
+| Durée, quantiles | `duration / fps`, arrondie à 3 décimales (1/30 s ⇒ 0,033) | une durée perçue |
+| Coupes/min | nombre de plans de la section ÷ minutes de la section | le rythme ressenti |
+| Changement d'angle | deux plans **contigus** du même groupe, angles différents | un choix artistique justifié |
+| « Respire » | part du temps dans des plans ≥ seuil explicite (6 s par défaut, réglable) | un jugement d'émotion |
+| Plan de coupe | clip d'une piste vidéo dont le rôle n'est pas `main` | **une vérité sémantique** : un plan posé sur la piste principale n'est pas vu comme plan de coupe, et réciproquement (testé) |
+| Fondus | fondus enchaînés **audio** seulement (aucune transition vidéo dans le moteur) | les transitions d'image |
+
+Non mesuré, jamais deviné : taille de plan, raccords de regard/mouvement, ralentis, rapport à la musique, émotion.
+Cadences testées : 24, 25, 30 et 50 i/s (entiers : le 23,976 / 29,97 n'est pas supporté par le modèle, à refuser explicitement plutôt qu'à approcher). Tests ajoutés : trous, chevauchements, transitions, annulation/rétablissement via une vraie `Session`, pistes secondaires, scission au rasoir.
+
+**Jeu d'essai réel anonymisé — à fournir par le réalisateur.** Je n'ai accès à aucun vrai projet ; je ne l'invente pas. Outil fourni :
+`python -m kolnoa_editor.experimental.memory_proto anonymize <dossier de session ou timeline.json> sortie.json`
+(lecture seule sur le projet ; remplace médias, titre, groupes, angles, étiquettes, notes, chutier et musique par des libellés génériques, de façon cohérente, **conserve** le texte des chapitres et le liste pour relecture ; un test vérifie qu'aucun nom ne subsiste et que les statistiques sont identiques). Le fichier anonymisé peut ensuite entrer dans `tests/data/` après relecture humaine. `analyze` produit le rapport.
 
 ## 2. Architecture proposée
 
@@ -98,24 +122,53 @@ Observation                          # issue de l'apprentissage des corrections
 
 ### 2.2 Rôle d'angle plutôt que numéro de caméra
 
-Pour apprendre « une logique de sélection indépendante du numéro de caméra », le réalisateur affecte **une fois par tournage** un rôle à chaque angle (ex. `large`, `moyen`, `serré`, `drone`, `réactions`, `plan fixe`). Le profil ne parle que de rôles. Un rôle non renseigné reste « inconnu » : il n'est jamais deviné. L'inférence automatique de la taille de plan est **expérimentale** et ne sera proposée qu'après un rapport sur vrais rushes.
+Pour apprendre « une logique de sélection indépendante du numéro de caméra », le réalisateur affecte **une fois par tournage** un rôle à chaque angle (ex. `large`, `moyen`, `serré`, `drone`, `réactions`, `plan fixe`). Le profil ne parle que de rôles. Un rôle non renseigné reste « inconnu » : il n'est jamais deviné. Pour ne pas redemander la même saisie : **préréglages de rôles** par type de tournage, reprise des affectations du tournage précédent *proposée à valider*, import depuis les étiquettes existantes. L'inférence automatique de la taille de plan est **expérimentale** et ne sera proposée qu'après un rapport sur vrais rushes.
 
 ### 2.3 Séquences : posées par l'humain d'abord
 
-La détection automatique de grandes séquences est un problème ouvert et non vérifié. v1 : les sections sont des **repères `chapter`** posés par le réalisateur (ou déduits des plages d'un fichier de sections). La détection automatique viendra en proposition à valider, étiquetée avec sa confiance.
+La détection automatique de grandes séquences est un problème ouvert et non vérifié. v1 : les sections sont des **repères `chapter`** posés par le réalisateur (ou déduits des plages d'un fichier de sections). La détection automatique viendra en proposition à valider, étiquetée avec sa confiance. Pour éviter la ressaisie : **modèles de chapitres** (ex. mairie → cérémonie → cocktail → réception → danses), import des repères existants. **Règle si un chapitre est déplacé** : la section suit ses bornes ; comme un repère `Marker` ne suit pas les opérations, les chapitres seront posés comme **repères liés au contenu** (ancres de la PR #25) et jamais comme repères de temps fixe : sinon l'analyse deviendrait fausse en silence.
 
 ### 2.4 Apprendre des corrections (§4)
 
-Source : le **journal de session** de la proposition générée. Les opérations issues de la proposition sont étiquetées (PR #25 E/G) ; toutes les opérations manuelles qui suivent sont comparées à l'état proposé et classées en types d'écart (plan prolongé, plan de coupe raccourci, angle remplacé, transition supprimée, plan réintégré…). Règles de portée, **explicites et réglables** :
-1. une occurrence : `ponctuelle` (valable pour ce projet seulement) ;
-2. répétée dans ≥ N occurrences d'un même type de section d'un projet : candidate `préférence de section` ;
-3. répétée dans ≥ M projets : candidate `préférence générale` ;
-4. si la cause est technique (angle marqué instable ou non synchronisé, média manquant, confiance faible), l'observation est étiquetée `contrainte technique`, **jamais** une préférence artistique.
-Aucune promotion n'est automatique : le panneau « Ce que Kolnoa Editor a appris » liste les candidates avec leurs preuves ; accepter / modifier / rejeter est le seul chemin.
+Source : le **journal de session** de la proposition générée. Les opérations issues de la proposition sont étiquetées (PR #25 E/G) ; toutes les opérations manuelles qui suivent sont comparées à l'état proposé et classées en types d'écart (plan prolongé, plan de coupe raccourci, angle remplacé, transition supprimée, plan réintégré…).
+
+**Seuils de départ (décidés par le réalisateur, configurables, à tester — pas des valeurs scientifiquement établies).** Ils servent **uniquement à décider quand proposer une règle** ; ils n'autorisent **jamais** une promotion automatique.
+
+| Niveau | Condition pour **proposer** au réalisateur |
+| --- | --- |
+| Observation | une correction validée crée une observation *en attente* |
+| Préférence de séquence | ≥ 3 corrections similaires dans ≥ 2 projets indépendants, **même type de section** ; puis validation explicite |
+| Préférence générale | ≥ 8 corrections similaires dans ≥ 4 projets indépendants et ≥ 2 types de sections ; puis validation explicite |
+| Contradiction | promotion **bloquée** ; arbitrage demandé |
+| Cause technique | exclue de l'apprentissage artistique (angle instable, non synchronisé, média défectueux, confiance faible) |
+
+Règles de comptage : des corrections **corrélées d'un même montage ne sont pas des preuves indépendantes** (dix corrections identiques dans un seul mariage = 1 projet : jamais une règle générale). « Corrections similaires » = même type d'écart, même rôle d'angle ou catégorie de plan, même type de section ; la similarité est définie et testée, pas laissée au jugement du modèle.
+Une observation « ponctuelle » reste valable pour le projet seulement. Le panneau « Ce que Kolnoa Editor a appris » liste candidates et preuves ; accepter / modifier / rejeter est le seul chemin ; retour arrière par version.
 
 ### 2.5 Génération et explicabilité
 
 Le moteur applique le profil en **contraintes et préférences** sur le générateur de premier montage (préparation multicam, plans de coupe, transitions), jamais en copiant des images. Chaque décision de la proposition porte la règle qui l'a produite (`R012`) ; le rapport avant application affiche : structure et durée par partie, décisions multicam principales, catégories de plans de coupe, transitions, éléments du film de référence réellement reproduits (règles utilisées), incertitudes et séquences absentes. Actions : prévisualiser, appliquer (**une** transaction réversible), modifier les consignes, annuler. Les séquences absentes du nouveau tournage ne sont **pas** inventées : elles sont listées comme « non trouvées ».
+
+### 2.6 Bibliothèque intelligente de plans de coupe (PR « L », avant M6)
+
+Décision du réalisateur : PR dédiée **avant M6** (génération et apprentissage des plans de coupe). Le chutier `Subclip + tags` est un point de départ, pas la bibliothèque. Besoin : indexer des **plages temporelles dans les rushes**, distinguer les types de plans, noter leur qualité technique, retrouver un plan par rôle narratif — et renvoyer des **candidats avec timecodes**, pas « une vidéo étiquetée alliances ».
+
+```
+ShotSegment                           # entité de projet, journalisée et annulable comme le reste ; n'écrit jamais le média
+  id, media (identifiant de média stable, pas seulement le chemin), src_in_frame, src_out_frame, src_fps (rationnel)
+  kind          # type de plan : détail, plan d'ambiance, réaction, large, insert, drone… (taxonomie extensible)
+  labels[]      # {label, origin: manuel | automatique, confidence 0..1, by, at}      ← distinction exigée
+  roles[]       # rôle narratif : {role: masquer_un_raccord | émotion | illustration | transition…, origin, confidence}
+  quality{}     # {metric: stabilité | netteté | exposition | mouvement_brusque, value, origin, confidence, verified: bool}
+  notes, status # actif | à revoir | exclu
+Query (structurée)
+  subject, kind, roles, min_duration_s, max_motion, stable_only, exclude_used, near (ancre de timeline), must_cover (plage à masquer)
+Candidate
+  segment, sub_range [in, out] en images source, score, raisons[] (quelle étiquette/mesure a compté), confidence, verified: bool
+```
+
+Exemple : *« un joli plan des alliances, stable, sans mouvement brusque, pour masquer cette coupe »* → l'assistant (PR #25 F) le convertit en `Query` (sujet « alliances », stabilité, `must_cover` = plage ancrée de la coupe) ; la bibliothèque renvoie des **candidats avec timecodes** (plage source exacte, assez longue pour couvrir la coupe, avec marge de fondu), classés, avec leurs raisons. **Jamais d'insertion automatique** : le candidat devient une intention `Cutaway` (PR #25 E) à valider.
+Deux niveaux : (1) **manuel/indexé** d'abord (I/O dans le chutier, catégories, rôles, qualité saisie) — suffisant et vérifiable ; (2) **analyse visuelle expérimentale** (stabilité, mouvement brusque, netteté) proposée avec `verified = false` et sa confiance, après rapport en lecture seule sur de vrais rushes. Une étiquette automatique ne remplace jamais une étiquette manuelle ; en cas de désaccord, la manuelle l'emporte et le désaccord est signalé. La bibliothèque ne bloque pas M1–M5.
 
 ## 3. Protocole de comparaison avec / sans profil (livrable 5)
 
@@ -141,7 +194,9 @@ Le moteur applique le profil en **contraintes et préférences** sur le généra
 | **Effort de correction** | nombre d'opérations manuelles et d'images modifiées par le réalisateur pour passer de la proposition au montage final (métrique principale en usage réel) |
 | Validité | 0 refus du moteur à l'application ; rushes inchangés (empreintes avant/après) ; déterminisme (même entrées ⇒ même proposition) |
 
-*Honnêteté statistique* : avec un seul film de référence, les écarts ne sont **pas** généralisables. Le rapport donne chaque métrique avec un intervalle (rééchantillonnage des plans, *bootstrap*) et son nombre d'échantillons, et ne conclut qu'à partir de seuils décidés à l'avance ; sous le seuil de couverture il écrit « non concluant ».
+*Honnêteté statistique (révisée après revue).* Un seul film de référence **ne valide pas la généralisation** : avec un seul projet, tout résultat est étiqueté **exploratoire / non concluant**. Les plans d'un même film ou d'une même séquence sont corrélés ; un *bootstrap par plans* donnerait une fausse précision. **L'unité indépendante est le projet** ; à défaut, des **blocs de sections** avec limites signalées. Les intervalles ne sont donnés qu'à partir de plusieurs projets.
+
+*Fixé avant les essais* : seuils de succès **et d'échec** par métrique (écrits dans le protocole, pas ajustés après coup) ; **B0 et B1 sur des rushes strictement identiques** ; aucune fuite entre apprentissage et évaluation (le film évalué est exclu du profil ; empreintes de contenu vérifiées). **Métrique principale en usage réel : temps de correction en minutes humaines** (chronométré), en plus du nombre d'opérations et d'images modifiées ; contrepoids : **qualité perçue en aveugle** et **respect des moments obligatoires** (aucun moment marqué obligatoire omis).
 
 ## 4. Découpage en PR
 
@@ -149,19 +204,22 @@ Chaque PR : indépendante, en brouillon, tests automatisés, documentation, crit
 
 | PR | Contenu | Tests | Critères de validation | Dépend de |
 | --- | --- | --- | --- | --- |
-| **M0 (cette PR)** | Plan + prototype jetable `memory/analyzer.py` (lecture seule) | statistiques sur timelines synthétiques à valeurs connues | le format de `ProfileStats` est jugé suffisant par le réalisateur ; aucune écriture dans la timeline | — |
-| **M1 — Analyseur de référence** | version durcie : chapitres, rôles d'angle, filtrage des plans sans intérêt, seuils réglables, rapport lisible, CLI `profile-analyze`, rapport sur vrais projets (lecture seule, comme `sync-calibrate`) | propriétés (invariance au déplacement global, additivité) ; projets incomplets, médias manquants, sections absentes | résultats exacts sur cas construits à la main ; rapport sur un vrai projet relu par le réalisateur | M0 |
-| **M2 — Gestionnaire de profils** | `StyleProfile`, règles, versions, dupliquer / exporter / importer / supprimer, combinaison par section (« structure de A, rythme des danses de B ») | aller-retour JSON ; combinaison déterministe ; retour à une version | aucune perte à l'export/import ; suppression propre | M1 |
+| **M0 (cette PR)** | Plan révisé + prototype **expérimental isolé** `experimental/memory_proto/` (lecture seule) + outil d'anonymisation | 19 tests : valeurs exactes, cadences 24/25/30/50, arrondis, trous, chevauchements, fondus, annulation par `Session`, pistes secondaires, anonymisation, isolation (aucun import depuis la production) | métriques documentées (§1 bis) ; un jeu d'essai **réel anonymisé** fourni par le réalisateur passe l'analyse ; aucune écriture dans la timeline | — |
+| **M1 — Analyseur de référence** | **réimplémentation propre** des parties du prototype retenues après validation sur cas réels (le prototype reste l'oracle de tests) : chapitres ancrés, rôles d'angle, seuils réglables, rapport lisible, CLI `profile-analyze`, rapport sur vrais projets (lecture seule, comme `sync-calibrate`) | propriétés (invariance au déplacement global, additivité) ; projets incomplets, médias manquants, sections absentes | résultats exacts sur cas construits à la main ; rapport sur un vrai projet relu par le réalisateur | M0 |
+| **M2 — Gestionnaire de profils** | `StyleProfile`, règles, versions, dupliquer / exporter / importer / supprimer, combinaison par section (« structure de A, rythme des danses de B ») ; **profil privé local** (provenance complète) distinct du **profil portable anonymisé** ; contrôle d'export (*lint*) | aller-retour JSON ; combinaison déterministe ; retour à une version ; le *lint* échoue si `sources`, `examples`, `provenance`, identifiants ou empreintes contiennent un nom de client/fichier | aucune perte à l'export/import ; aucun client identifiable dans un profil portable | M1 |
 | **M3 — Rôles d'angle** | affectation par tournage (jamais devinée), persistée, utilisée par l'analyseur | rôle absent ⇒ « inconnu » ; migration | jamais d'inférence silencieuse | M1 |
 | **M4 — Observations et panneau « appris »** | modèle `Observation`, états, provenance, retour arrière, panneau (logique sans écran + UI) | une correction isolée ne change jamais le profil ; accepter/rejeter/modifier ; versionnage | aucune règle ne naît sans décision explicite | M2 |
 | **M5 — Apprentissage des corrections** | comparateur proposé ↔ validé sur le journal, classification des écarts, portée ponctuelle / section / générale, étiquette de cause technique | écarts construits à la main ; causes techniques non promues en préférences | scénarios d'acceptation 5 et 6 | M4, PR #25 (E, G) |
-| **M6 — Générateur sensible au style** | profil → contraintes/préférences du premier montage : structure, multicam (plans stables, rôles), plans de coupe par catégorie, transitions | validité (0 refus), déterminisme, respect des règles dures, séquences absentes listées | scénarios 2, 3, 4 ; comparaison B0/B1 produite | M2, M3, PR #25 E |
+| **L — Bibliothèque intelligente de plans de coupe** | `ShotSegment`, `Query`, `Candidate` (§2.6), manuel/indexé d'abord, étiquettes manuelles vs automatiques avec confiance, qualité technique, rôles narratifs, recherche de candidats avec timecodes, intégration à `Cutaway` ; niveau visuel expérimental (`verified=false`) | exactitude des plages (images source ↔ timeline, 25/50 i/s) ; une étiquette manuelle l'emporte ; recherche : sujet + stabilité + durée suffisante pour couvrir une coupe ; rushes inchangés | l'exemple « alliances, stable, sans mouvement brusque, pour masquer cette coupe » renvoie des candidats avec timecodes et raisons, sans insertion automatique | A2, C de #25 |
+| **M6 — Générateur sensible au style** | profil → contraintes/préférences du premier montage : structure, multicam (plans stables, rôles), plans de coupe par catégorie, transitions | validité (0 refus), déterminisme, respect des règles dures, séquences absentes listées | scénarios 2, 3, 4 ; comparaison B0/B1 produite | M2, M3, **L**, PR #25 E |
 | **M7 — Contexte de prompt** | références à d'autres projets dans les consignes (« comme le film A, danses du film B ») | résolution de références ambiguës ⇒ question | scénario 7 | M2, PR #25 F |
 | **M8 — Validation et explicabilité** | rapport avant application, explication par règle, Appliquer/Annuler en une transaction | un seul pas d'undo ; annuler = état antérieur identique | scénario 8 | M6, PR #25 G |
 | **M9 — Banc de comparaison** | harnais du §3 : B0/B1/H, métriques, rapport avec intervalles, présentation en aveugle | métriques sur cas connus ; bootstrap reproductible | protocole exécutable de bout en bout sur données synthétiques | M6 |
 | **M10 — Robustesse** | médias manquants, projets incomplets, profil sans accès au film de référence, rushes intacts | scénarios 9 et 10 | empreintes inchangées | M6 |
 
-Dépendances externes à trancher : la **bibliothèque intelligente de plans de coupe** (absente du dépôt), les transitions vidéo (PR K de #25), la détection de séquences, l'analyse de stabilité (PR I de #25).
+**Exigence transversale (revue)** : la mémoire est **au service du mode mission** (« mission complète en langage naturel → autonomie → proposition → finitions », voir `PROMPTS_ASSISTANT.md` §13), pas une interface de configuration obligatoire : un profil par défaut est choisi/proposé automatiquement et chaque réglage reste facultatif.
+
+Dépendances externes : transitions vidéo (PR K de #25), détection de séquences, analyse de stabilité (PR I de #25).
 
 ## 5. Risques et décisions demandées
 
@@ -170,4 +228,5 @@ Dépendances externes à trancher : la **bibliothèque intelligente de plans de 
 - **Films exportés seuls** : n'apportent que la structure grossière et les durées ; pas d'angles ni de plans de coupe.
 - **Respect de la vie privée** : le profil ne contient ni média, ni nom de fichier source, ni nom de client ; il est exportable.
 
-Décisions : (1) sections posées par l'humain en v1, détection automatique plus tard ; (2) rôles d'angle affectés par le réalisateur ; (3) seuils de promotion N et M réglables (valeurs par défaut à fixer avec toi) ; (4) bibliothèque de plans de coupe : à concevoir dans une PR dédiée ou existe-t-elle ailleurs ? ; (5) le prototype M0 : conserver, durcir (M1) ou jeter.
+**Décisions prises** (réalisateur, revue ChatGPT) : sections et rôles posés par l'humain en v1 avec modèles et préréglages ; bibliothèque de plans de coupe en PR dédiée avant M6 ; seuils de §2.4 comme valeurs de départ configurables, sans promotion automatique ; prototype conservé comme outil expérimental isolé ; un film de référence = résultat exploratoire.
+**Restent à décider** : fournir un projet réel anonymisé pour le jeu d'essai ; format du *lint* d'export (quelles zones vérifier) ; valeur du seuil « respire » (6 s par défaut) ; quelles parties du prototype réimplémenter en M1.

@@ -1,4 +1,4 @@
-"""Mémoire de réalisation (PROTOTYPE jetable, lecture seule) — voir docs/DIRECTOR_MEMORY.md."""
+"""Mémoire de réalisation — prototype EXPÉRIMENTAL isolé (oracle de tests), lecture seule — voir docs/DIRECTOR_MEMORY.md."""
 
 from .analyzer import ANALYZER_VERSION, SCHEMA, analyze_timeline, render_report
 

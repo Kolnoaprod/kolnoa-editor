@@ -18,7 +18,7 @@ import hashlib
 import json
 from typing import Any
 
-from ..timeline import Timeline
+from ...timeline import Timeline
 
 SCHEMA = "kolnoa.memory.profile_stats/0"
 ANALYZER_VERSION = "0-prototype"
