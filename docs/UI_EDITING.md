@@ -30,3 +30,15 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
 - Modes : `drop_mode` (`overwrite` par défaut, ou `insert`), **Ctrl pendant le glisser inverse le mode**. L'insertion décale la suite de la piste visée seulement
   (pas des autres pistes ; le moteur refuse de désynchroniser une piste verrouillée). `drop_with_audio=True` pose aussi le son lié sur la 1re piste audio déverrouillée.
 - Dépôt = UNE transaction (annulable d'un geste). Tests : `tests/test_bin_drag.py` (événements Qt réels de glisser/déposer inclus).
+
+## 4. Formes d'onde asynchrones (PR formes d'onde)
+- `ui/peak_service.py` : `PeakService.get(media)` **ne bloque jamais** (pyramide complète, partielle ou None) ; le calcul tourne dans 2 fils
+  (ffmpeg décode en flux, une pyramide partielle est publiée toutes les ~10 s de média) → l'onde se remplit de gauche à droite.
+- Priorité : `want([...])` (rushs visibles, les plus proches du centre de l'écran d'abord) passe devant la file.
+- Cache disque : un `.npy` par rush, clé = chemin + taille + date + version, écriture atomique (`.tmp` + `os.replace`), cache abîmé → recalcul,
+  rush modifié → nouvelle clé. Un rush sans audio est mémorisé. Le média source n'est jamais touché.
+- Vue : `TimelineView(peak_service=...)` ; une tranche reçue invalide les images du rush et déclenche UN redessin regroupé (80 ms) ; une image d'onde n'est mise en
+  cache que si elle est **définitive** (calcul terminé ou plan entièrement couvert) ; la partie non calculée = ligne médiane pointillée. Le chemin de dessin
+  du pan/zoom ne change pas (mêmes caches par plan) → fluidité conservée.
+- Arrêt propre : `close()` annule et tue ffmpeg (< 2 s). Tests : `tests/test_peak_service.py` (progressif, priorité, cache, corruption, annulation, fluidité du dessin
+  pendant le calcul sur 480 plans / 8 pistes : médiane ~3 ms, p95 ~6 ms dans le bac à sable, rendu logiciel).
