@@ -11,3 +11,11 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
 - Vue : poignée de 6 px à chaque bord (curseur ↔), aimantation sur bords/repères/tête de lecture, **prévisualisation** (fantôme + trait + « +N i · timecode »,
   orange « limite » quand on bute), Échap annule, le relâcher valide en UNE transaction. Les plans liés suivent. Rien n'est écrit pendant le glisser.
 - Tests : `tests/test_trim.py` (moteur) et `tests/test_ui_timeline.py` (geste complet, limite, Échap, poignées source).
+
+## 2. Rasoir (PR rasoir)
+- Moteur inchangé : `razor()` (SplitClip) copie TOUT le plan : source, gain, notes, étiquette, routage audio, angle/groupe multicam ; le fondu d'entrée reste à
+  gauche, le fondu de sortie à droite ; les moitiés de plans liés restent liées par paire ; pistes verrouillées épargnées (refus si nommées).
+- Vue : `S` coupe à la tête de lecture les pistes des plans **sélectionnés** (leurs liés suivent), ou toutes les pistes déverrouillées sans sélection ;
+  `Maj+S` coupe toutes les pistes. Rien à couper → refus signalé, modèle intact. `Ctrl+Z` annule, `Ctrl+Maj+Z` / `Ctrl+Y` rétablit (une coupe = une étape).
+- Raccourcis : `ui/shortcuts.py`, défauts `S`, `Maj+S`, `Ctrl+Z`, `Ctrl+Maj+Z`, `Ctrl+Y` ; modifiables (`Shortcuts.set`, fichier JSON, conflits refusés,
+  fichier abîmé → défauts). Un réglage d'interface n'entre jamais dans le montage.

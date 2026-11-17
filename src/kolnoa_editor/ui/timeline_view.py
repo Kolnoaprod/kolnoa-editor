@@ -14,11 +14,12 @@ from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from ..timeline.editing import linked_ids, move_clips, snap_frame, snap_move, snap_points, trim_edge, trim_limits
+from ..timeline.editing import linked_ids, move_clips, razor, snap_frame, snap_move, snap_points, trim_edge, trim_limits
 from ..timeline.model import Clip, Timeline, TimelineError
 from ..timeline.session import Session
 from . import layout as L
 from .peaks import PeakPyramid
+from .shortcuts import Shortcuts
 
 BG, RULER_BG, GRID = QColor("#0d0f13"), QColor("#161a21"), QColor("#232a35")
 CLIP_COLORS = {"video": QColor("#3b6ea8"), "audio": QColor("#3f7f5f")}
@@ -32,9 +33,10 @@ class TimelineView(QWidget):
     edited = Signal(str)               # libellé de l'action validée dans la session
     rejected = Signal(str)             # action refusée par le moteur (chevauchement, piste verrouillée…)
 
-    def __init__(self, session: Session, peaks_provider=None, parent=None, source_len=None):
+    def __init__(self, session: Session, peaks_provider=None, parent=None, source_len=None, shortcuts=None):
         super().__init__(parent)
         self.session = session
+        self.shortcuts = shortcuts or Shortcuts()
         self.source_len = source_len or (lambda media: None)           # media -> durée du rush en secondes | None
         self.peaks_provider = peaks_provider or (lambda media: None)   # media -> PeakPyramid | None
         self.vp = L.Viewport()
@@ -322,8 +324,58 @@ class TimelineView(QWidget):
                     self.rejected.emit(str(err))
         self.update()
 
+    # --- actions du moteur déclenchées au clavier -----------------------------------------------------------
+    def _run(self, make_tx, label_fallback: str) -> None:
+        """Construit la transaction auprès du moteur, l'applique en UNE étape d'annulation ; un refus ne change rien."""
+        try:
+            tx = make_tx()
+            self.session.do(tx, tx.label if hasattr(tx, "label") else label_fallback)
+        except TimelineError as err:
+            self.rejected.emit(str(err))
+            return
+        self.refresh_model()
+        self.edited.emit(tx.label if hasattr(tx, "label") else label_fallback)
+        self.update()
+
+    def razor_at_playhead(self, all_tracks: bool = False) -> None:
+        """Coupe à la tête de lecture. Avec une sélection : seulement les pistes des plans sélectionnés (leurs liés suivent) ;
+        sans sélection (ou `all_tracks`) : toutes les pistes déverrouillées. Les moitiés gardent source, gain, fondus extérieurs,
+        angle multicam, routage audio, notes et réglages (le moteur copie tout le plan)."""
+        tracks = None
+        if self.selection and not all_tracks:
+            tracks = sorted({self.tl.clip(c).track for c in self.selection if any(k.id == c for k in self.tl.clips)})
+        self._run(lambda: razor(self.tl, self.playhead, tracks), "Rasoir")
+
+    def undo(self) -> None:
+        try:
+            label = self.session.undo()
+        except TimelineError as err:
+            self.rejected.emit(str(err))
+            return
+        self.refresh_model()
+        self.edited.emit(f"Annuler : {label}")
+        self.update()
+
+    def redo(self) -> None:
+        try:
+            label = self.session.redo()
+        except TimelineError as err:
+            self.rejected.emit(str(err))
+            return
+        self.refresh_model()
+        self.edited.emit(f"Rétablir : {label}")
+        self.update()
+
     def keyPressEvent(self, e):
         k = e.key()
+        action = self.shortcuts.action_for(e)
+        if action in ("razor", "razor_all"):
+            self.razor_at_playhead(all_tracks=action == "razor_all")
+            return
+        if action == "undo":
+            return self.undo()
+        if action in ("redo", "redo_alt"):
+            return self.redo()
         if k == Qt.Key_Escape and (self._drag or self._trim):
             self._drag = self._trim = None
             self.update()
