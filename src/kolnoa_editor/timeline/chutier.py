@@ -56,7 +56,25 @@ def place_subclip(tl: Timeline, sub_id: str, track: str, start: int, mode: str =
                   audio_track: str | None = None, ripple_tracks: list[str] | None = None) -> Transaction:
     """Glisse un plan du chutier sur `track` à l'image `start`. Avec `audio_track`, son son (même rush) est posé en
     même temps sur cette piste audio et lié à l'image. Un seul pas d'annulation."""
-    b = tl.subclip(sub_id)
+    return _place(tl, tl.subclip(sub_id), track, start, mode, audio_track, ripple_tracks)
+
+
+def place_rush(tl: Timeline, media: str, length_s: float, track: str, start: int, src_in: float = 0.0,
+               mode: str = "overwrite", audio_track: str | None = None, ripple_tracks: list[str] | None = None,
+               kind: str = "video", name: str = "", source_len: float | None = None) -> Transaction:
+    """Glisse directement un rush (sans passer par le chutier) : `length_s` secondes à partir de `src_in`. Même règles
+    que `place_subclip` ; ne crée aucune entrée de chutier. `source_len` (durée du rush) borne la plage."""
+    if length_s <= 0 or src_in < 0:
+        raise TimelineError("plage de rush invalide")
+    if source_len is not None and src_in + length_s > source_len + 1e-6:
+        raise TimelineError(f"la plage dépasse la fin du rush ({source_len:.2f} s)")
+    from .model import Subclip
+    return _place(tl, Subclip("rush", media, round(src_in, 6), round(src_in + length_s, 6), name or media.rsplit("/", 1)[-1], kind),
+                  track, start, mode, audio_track, ripple_tracks, f"rush {media.rsplit('/', 1)[-1]}")
+
+
+def _place(tl: Timeline, b, track: str, start: int, mode: str, audio_track: str | None, ripple_tracks: list[str] | None,
+           what: str | None = None) -> Transaction:
     frames = max(1, round(b.length * tl.fps))
     kind = tl.track(track).kind
     if kind != b.kind:
@@ -78,4 +96,4 @@ def place_subclip(tl: Timeline, sub_id: str, track: str, start: int, mode: str =
         snd = Clip(ids.clip(), audio_track, b.media, start, frames, b.src_in, audio="source", label=b.name, link=link)
         parts.append(place_clip(work, snd, mode, ripple_tracks, ids))
         execute(work, parts[-1])
-    return Transaction(parts, f"chutier {b.id} → {track} à l'image {start}")
+    return Transaction(parts, f"{what or 'chutier ' + b.id} → {track} à l'image {start}")

@@ -14,9 +14,12 @@ from PySide6.QtCore import QPoint, QRect, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
+from ..timeline.chutier import place_rush, place_subclip
 from ..timeline.editing import linked_ids, move_clips, razor, snap_frame, snap_move, snap_points, trim_edge, trim_limits
 from ..timeline.model import Clip, Timeline, TimelineError
+from ..timeline.ops import execute
 from ..timeline.session import Session
+from . import dnd
 from . import layout as L
 from .peaks import PeakPyramid
 from .shortcuts import Shortcuts
@@ -44,6 +47,10 @@ class TimelineView(QWidget):
         self.selection: list[str] = []
         self._drag: dict | None = None
         self._trim: dict | None = None
+        self._drop: dict | None = None
+        self.drop_mode = "overwrite"              # 'overwrite' | 'insert' ; Ctrl pendant le glisser = l'autre mode
+        self.drop_with_audio = False              # pose aussi le son (lié) sur la 1re piste audio déverrouillée
+        self.setAcceptDrops(True)
         self._scrub = False
         self._wave_cache: dict = {}
         self.stats = {"paint_ms": 0.0, "clips_drawn": 0}
@@ -96,6 +103,7 @@ class TimelineView(QWidget):
         self._paint_clips(p)
         self._paint_ghost(p)
         self._paint_trim(p)
+        self._paint_drop(p)
         self._paint_ruler(p)
         x = self.vp.x_of(self.playhead)
         p.setPen(QPen(PLAYHEAD, 2))
@@ -323,6 +331,96 @@ class TimelineView(QWidget):
                 except TimelineError as err:
                     self.rejected.emit(str(err))
         self.update()
+
+    # --- dépôt depuis le chutier -----------------------------------------------------------------------------
+    def plan_drop(self, payload: dict, x: float, y: float, ctrl: bool = False):
+        """Évalue un dépôt SANS rien modifier : renvoie un dict {ok, reason, track, start, frames, mode, tx}.
+        La validité vient du moteur lui-même (essai sur une copie) : pistes verrouillées, type de piste, chevauchements, ripple."""
+        mode = {"overwrite": "insert", "insert": "overwrite"}[self.drop_mode] if ctrl else self.drop_mode
+        tid = self.rows.track_at(y)
+        res = {"ok": False, "reason": "", "track": tid, "start": 0, "frames": 1, "mode": mode, "tx": None, "audio_track": None}
+        if tid is None:
+            res["reason"] = "dépose sur une piste"
+            return res
+        try:
+            if "sub" in payload:
+                b = self.tl.subclip(payload["sub"])
+                length, kind = b.length, b.kind
+            else:
+                length, kind = float(payload["length"]), payload.get("kind", "video")
+            frames = max(1, round(length * self.tl.fps))
+            raw = max(0, round(self.vp.frame_of(x)))
+            start = snap_frame(raw, snap_points(self.tl, playhead=self.playhead), max(1, round(SNAP_PX / self.vp.zoom)))
+            res.update(start=max(0, start), frames=frames)
+            if self.tl.track(tid).locked:
+                raise TimelineError(f"la piste {tid} est verrouillée")
+            if self.tl.track(tid).kind != kind:
+                raise TimelineError(f"un plan {kind} ne se pose pas sur la piste {tid} ({self.tl.track(tid).kind})")
+            audio_track = None
+            if self.drop_with_audio and kind == "video":
+                audio_track = next((t.id for t in self.tl.tracks if t.kind == "audio" and not t.locked), None)
+            res["audio_track"] = audio_track
+            if "sub" in payload:
+                tx = place_subclip(self.tl, payload["sub"], tid, res["start"], mode, audio_track)
+            else:
+                tx = place_rush(self.tl, payload["media"], length, tid, res["start"], float(payload.get("src_in", 0.0)), mode,
+                                audio_track, None, kind, payload.get("name", ""), self.source_len(payload["media"]))
+            execute(self.tl.copy(), tx)                     # essai complet sur une copie : le modèle réel n'est jamais touché
+            res.update(ok=True, tx=tx)
+        except TimelineError as err:
+            res["reason"] = str(err)
+        return res
+
+    def dragEnterEvent(self, e):
+        self._drop_payload = dnd.decode(e.mimeData())
+        if self._drop_payload is None:
+            return e.ignore()
+        e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        pl = getattr(self, "_drop_payload", None)
+        if pl is None:
+            return e.ignore()
+        pos = e.position()
+        key = (pl.get("sub") or pl.get("media"), int(pos.x()), int(pos.y()), bool(e.modifiers() & Qt.ControlModifier))
+        if not self._drop or self._drop.get("key") != key:        # on ne ré-évalue que si la position a changé
+            self._drop = {**self.plan_drop(pl, pos.x(), pos.y(), key[3]), "key": key}
+            self.update()
+        e.acceptProposedAction()
+
+    def dragLeaveEvent(self, e):
+        self._drop = None
+        self._drop_payload = None
+        self.update()
+
+    def dropEvent(self, e):
+        pl = dnd.decode(e.mimeData())
+        pos = e.position()
+        plan = self.plan_drop(pl, pos.x(), pos.y(), bool(e.modifiers() & Qt.ControlModifier)) if pl else None
+        self._drop = None
+        self._drop_payload = None
+        self.update()
+        if plan is None:
+            return e.ignore()
+        if not plan["ok"]:
+            self.rejected.emit(plan["reason"])
+            return e.ignore()
+        self._run(lambda: plan["tx"], "Dépôt")
+        e.acceptProposedAction()
+
+    def _paint_drop(self, p: QPainter) -> None:
+        d = self._drop
+        if not d or not d.get("track"):
+            return
+        y, h = self.rows.y.get(d["track"], 0), self.rows.height(d["track"])
+        x = self.vp.x_of(d["start"])
+        col = QColor(80, 200, 120, 110) if d["ok"] else QColor(230, 70, 70, 110)
+        p.fillRect(QRectF(x, y + 1, d["frames"] * self.vp.zoom - 1, h - 2), col)
+        if d["mode"] == "insert":
+            p.setPen(QPen(QColor("#4ad0ff"), 3))
+            p.drawLine(int(x), y, int(x), y + h)
+        p.setPen(QColor("#e8eaed"))
+        p.drawText(int(x) + 6, y + 14, ("insertion" if d["mode"] == "insert" else "recouvrement") if d["ok"] else d["reason"])
 
     # --- actions du moteur déclenchées au clavier -----------------------------------------------------------
     def _run(self, make_tx, label_fallback: str) -> None:

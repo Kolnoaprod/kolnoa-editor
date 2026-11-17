@@ -9,7 +9,7 @@ from .audio_edit import (add_crossfade, assign_master, clear_master, master_at, 
                          to_stereo)
 from .audio_mix import MixEvent, MixPlan, MixReport, build_mix_plan, measure_loudness, render_mix
 from .audio_quality import AudioMeasure, AudioProposal, measure_audio, propose_master, score_measure
-from .chutier import adjust_subclip, mark_subclip, place_subclip, remove_subclip, search_bin
+from .chutier import adjust_subclip, mark_subclip, place_rush, place_subclip, remove_subclip, search_bin
 from .model import (Angle, AudioSettings, AudioStrip, Crossfade, MasterRange, MulticamGroup, Subclip, Clip, LockedError, Marker, Timeline, TimelineError, Track, SCHEMA)
 from .ops import (AddCrossfade, AddMaster, RemoveCrossfade, RemoveMaster, SetAudioSettings, SetClipStrips, AddSubclip, RemoveSubclip, SetSubclip, AddGroup, RemoveGroup, AddAngle, RemoveAngle, SetAngleSync, SetClipAngle, add_multicam_clip,
                   switch_angle, nudge_angle, lock_angle, accept_angle, AddClip, AddMarker, AddTrack, JoinClips, MoveClip, Op, RemoveClip, RemoveMarker,
