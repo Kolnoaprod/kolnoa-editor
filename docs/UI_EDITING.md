@@ -19,3 +19,14 @@ un geste = une étape d'annulation, un refus du moteur laisse le modèle intact.
   `Maj+S` coupe toutes les pistes. Rien à couper → refus signalé, modèle intact. `Ctrl+Z` annule, `Ctrl+Maj+Z` / `Ctrl+Y` rétablit (une coupe = une étape).
 - Raccourcis : `ui/shortcuts.py`, défauts `S`, `Maj+S`, `Ctrl+Z`, `Ctrl+Maj+Z`, `Ctrl+Y` ; modifiables (`Shortcuts.set`, fichier JSON, conflits refusés,
   fichier abîmé → défauts). Un réglage d'interface n'entre jamais dans le montage.
+
+## 3. Glisser depuis le chutier (PR chutier)
+- Moteur : `place_subclip` (existant) et nouveau `place_rush(media, durée, piste, image, src_in, mode, …)` pour un rush brut — même code (`_place`),
+  aucune entrée de chutier créée, plage bornée par la durée du rush.
+- `ui/bin_view.py` : liste des plans du chutier, glisser (QDrag). `ui/dnd.py` : charge `{"sub": id}` ou `{"media", "length", "src_in", "kind"}` — que des références, jamais de chemin absolu ; charge étrangère/abîmée ignorée.
+- `TimelineView.plan_drop` évalue un dépôt **sans rien modifier** : la validité vient du moteur (essai complet de la transaction sur une copie) →
+  piste verrouillée, type de piste (vidéo/audio), plan verrouillé dessous, ripple refusé, fin du rush : raison affichée en rouge dans l'aperçu.
+- Aperçu avant dépôt : fantôme vert (valide) / rouge (refusé, avec la raison), trait bleu = insertion. Aimantation sur bords, repères, tête de lecture.
+- Modes : `drop_mode` (`overwrite` par défaut, ou `insert`), **Ctrl pendant le glisser inverse le mode**. L'insertion décale la suite de la piste visée seulement
+  (pas des autres pistes ; le moteur refuse de désynchroniser une piste verrouillée). `drop_with_audio=True` pose aussi le son lié sur la 1re piste audio déverrouillée.
+- Dépôt = UNE transaction (annulable d'un geste). Tests : `tests/test_bin_drag.py` (événements Qt réels de glisser/déposer inclus).
