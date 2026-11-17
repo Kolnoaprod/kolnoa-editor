@@ -243,7 +243,10 @@ Ordre révisé (revue) : **A1 → A2 → (B, C) → E → F → G** en priorité
 5. **Ordre** : voir §10 (révisé).
 6. **`Marker` conservé** pour la compatibilité, jamais une ancre ; PR R pour les natures explicites.
 
-Restent à trancher : seuils de performance mesurables pour A1 (valeurs de départ à fixer par mesure), format exact de l'`media_id`, taxonomie initiale des natures de repère.
+Les trois points ouverts sont traités dans une **proposition technique documentée** (`A1_ANCRES_PROPOSITION.md`, sans code produit) :
+`media_id` = UUID opaque immuable dans un registre de projet, rapprochement distinct (jamais un hash partiel comme preuve d'identité, aucune empreinte privée dans un export) ;
+performance = hypothèse p95 < 5 ms à **mesurer** (petit/moyen/gros/extrême, froid/chaud, p50/p95/p99, machine) avant tout SLA ;
+repères liés = objet distinct portant son état de résolution, `Marker` historique inchangé. Restent à trancher : découpage d'A1 en une ou trois PR, emplacement du registre, taxonomie initiale des natures de repère.
 
 ## 13. Mode mission autonome (exigence produit prioritaire)
 
