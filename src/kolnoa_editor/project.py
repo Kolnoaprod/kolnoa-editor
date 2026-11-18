@@ -39,6 +39,11 @@ class Project:
         return self.data / "library.json"
 
     @property
+    def media_registry_path(self) -> Path:
+        """Registre d'identité des médias (`media_id` opaques) : un par projet, partagé par toutes les séquences."""
+        return self.data / "media_registry.json"
+
+    @property
     def proxies_dir(self) -> Path:
         return self.data / "proxies"
 
