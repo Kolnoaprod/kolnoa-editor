@@ -23,8 +23,12 @@ from .timeline_view import TimelineView
 
 
 class AppWindow(QMainWindow):
-    def __init__(self, controller: ProjectController, exporter=None, analyzer=None):
+    def __init__(self, controller: ProjectController, exporter=None, analyzer=None, player_factory=None, sync_source_factory=None):
         super().__init__()
+        self.player_factory = player_factory       # (controller, group_id) -> widget lecteur (avec `.player`) | None ; défaut : lecteur multicam réel
+        self.sync_source_factory = sync_source_factory
+        self.player_view = None
+        self._player_gid = None
         self.ctl = controller
         self.exporter = exporter                 # (controller, chemin) -> rapport ; injectable (tests, lot J1-b)
         self.analyzer = analyzer
@@ -80,9 +84,16 @@ class AppWindow(QMainWindow):
         left.addWidget(self.rushes, 1)
         lw = QWidget()
         lw.setLayout(left)
+        self.view_box = QVBoxLayout()
+        vb = QWidget()
+        vb.setLayout(self.view_box)
+        self.vsplit = QSplitter(Qt.Vertical)
+        self.vsplit.addWidget(vb)
+        self.vsplit.addWidget(self.tlv)
+        self.vsplit.setStretchFactor(1, 2)
         top = QSplitter(Qt.Horizontal)
         top.addWidget(lw)
-        top.addWidget(self.tlv)
+        top.addWidget(self.vsplit)
         top.setStretchFactor(1, 6)
         lay = QVBoxLayout()
         lay.addWidget(top, 1)
@@ -103,7 +114,64 @@ class AppWindow(QMainWindow):
             it.setData(Qt.UserRole, seq)
             self.rushes.addItem(it)
         self.tlv.refresh_model()
+        self._ensure_player()
         self._update_zone()
+
+    # --- lecteur multicam ---------------------------------------------------------------------------------
+    def _ensure_player(self) -> None:
+        tl = self.ctl.tl
+        gid = tl.groups[0].id if tl.groups else None
+        if gid == self._player_gid:
+            return
+        if self.player_view is not None:
+            self.view_box.removeWidget(self.player_view)
+            getattr(self.player_view, "close", lambda: None)()
+            self.player_view.deleteLater()
+            self.player_view = None
+        self._player_gid = gid
+        if gid is None:
+            return
+        try:
+            factory = self.player_factory or default_player_factory
+            self.player_view = factory(self.ctl, gid)
+        except Exception as e:                              # noqa: BLE001 — pas de lecteur (pilote vidéo, proxy absent) : la timeline reste utilisable
+            self.say(f"Lecteur indisponible : {e}")
+            self.player_view = None
+        if self.player_view is not None:
+            self.view_box.addWidget(self.player_view)
+            self.tlv.playheadChanged.connect(self._seek_player)
+
+    def _seek_player(self, frame: int) -> None:
+        pv = self.player_view
+        if pv is not None and hasattr(pv, "player"):
+            pv.player.seek(frame / self.ctl.tl.fps)
+
+    def angles_of_selection(self) -> list[str]:
+        tl = self.ctl.tl
+        out: list[str] = []
+        for cid in self.tlv.selection:
+            c = tl.clip(cid)
+            if c.group:
+                out = [a.id for a in tl.group(c.group).angles if a.usable and a.kind == "video"]
+        return out
+
+    def switch_angle(self, angle_id: str) -> bool:
+        """Change l'angle des plans multicam sélectionnés (même instant, même son maître). Un seul pas d'annulation ; protégé comme toute retouche manuelle."""
+        from ..timeline import Transaction
+        from ..timeline.ops import switch_angle
+        tl = self.ctl.tl
+        ids = [c for c in self.tlv.selection if tl.clip(c).group]
+        if not ids:
+            self.say("Sélectionnez d'abord un plan multicam.")
+            return False
+        try:
+            self.ctl.session.do(Transaction([switch_angle(tl, i, angle_id) for i in ids], f"angle {angle_id}"), f"angle {angle_id}")
+        except TimelineError as e:
+            self.say(f"Refusé : {e}")
+            return False
+        self.say(f"Angle {angle_id} sur {len(ids)} plan(s).")
+        self.refresh()
+        return True
 
     def _edited(self, label: str) -> None:
         self.say(label)
@@ -168,8 +236,11 @@ class AppWindow(QMainWindow):
             from ..auto.directives import parse_directive
             d = parse_directive(text)
             if d.kind == "build":
-                rep = self.ctl.build(text, self.selected_sequence(), analyzer=self.analyzer)
-                self.say(f"{rep.shots} plans posés ({', '.join(rep.sections)}). Ctrl+Z annule toute la génération.")
+                rep = self.ctl.build_with_multicam(text, self.selected_sequence(), analyzer=self.analyzer, source_factory=self.sync_source_factory)
+                g = rep["groups"]
+                skipped = [f"{x['name']}: {', '.join(x['skipped'])}" for x in g if x["skipped"]]
+                self.say(f"Montage posé : {len(g)} groupe(s) multicam, {rep['plain']} plan(s) à plat. Ctrl+Z annule toute la génération."
+                         + (f" ⚠ angle(s) non synchronisé(s), écarté(s) : {'; '.join(skipped)}" if skipped else ""))
             else:
                 sel = self.current_selection()
                 r = self.ctl.command(text, sel, analyzer=self.analyzer)
@@ -224,6 +295,23 @@ class AppWindow(QMainWindow):
     def closeEvent(self, e) -> None:
         self.peaks.close()
         super().closeEvent(e)
+
+
+def default_player_factory(ctl: ProjectController, gid: str):
+    """Lecteur multicam réel : un lecteur par angle (proxy s'il existe, sinon original), planifié par `MulticamPlayer`."""
+    from ..player.controller import MulticamPlayer
+    from ..player.qt_backend import configure_hw
+    from ..player.scheduler import MediaInfo
+    from ..probe import probe
+    from .multicam_view import MulticamView
+    configure_hw()
+    media = {}
+    for a in ctl.tl.group(gid).angles:
+        src = ctl.project.root / a.media
+        i = probe(src)
+        proxy = ctl.project.proxy_path(a.media)
+        media[a.id] = MediaInfo(str(src), i.width or 1920, i.height or 1080, i.fps or 25.0, str(proxy) if proxy.is_file() else None, 540, i.duration)
+    return MulticamView(lambda mk: MulticamPlayer(ctl.tl, gid, "V1", media, mk, budget=6e8, hw_decode=True))
 
 
 def run_app(argv: list[str]) -> int:

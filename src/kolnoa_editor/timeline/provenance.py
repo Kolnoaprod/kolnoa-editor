@@ -121,6 +121,8 @@ def changes(before: dict, after: dict) -> list[Change]:
 
 def check_scope(chs: list[Change], scope: Scope | None, states: dict[str, str], confirmed_protected: bool) -> list[str]:
     problems: list[str] = []
+    if not chs:
+        return []                      # rien n'a changé dans les plans (p. ex. réglage de synchro d'un groupe) : aucune zone à garder
     if scope is None:
         return ["une transaction automatique doit déclarer sa portée (Scope)"]
     for c in chs:

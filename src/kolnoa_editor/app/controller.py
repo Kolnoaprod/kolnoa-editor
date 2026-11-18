@@ -14,7 +14,7 @@ from ..auto import (DirectiveResult, EditContext, RushInfo, StyleParams, analyze
 from ..auto.directives import DirectiveError
 from ..project import Project
 from ..scanner import SourceFile, load_library, refresh, save_library
-from ..timeline import Selection, Session, Timeline
+from ..timeline import Scope, Selection, Session, Timeline
 from ..timeline.model import Track
 
 Analyzer = Callable[[RushInfo, Project], list]
@@ -96,6 +96,74 @@ class ProjectController:
             raise DirectiveError("aucun plan retenu : importez des rushes et vérifiez la sélection de séquence")
         return generate_first_edit(self.session, shots, label=prompt, durations={m: r.duration for m, r in self.rushes.items()},
                                    on_section=on_section)
+
+    def build_with_multicam(self, prompt: str = "Monte-moi cette séquence", section: str | None = None, style: StyleParams | None = None,
+                            analyzer: Analyzer | None = None, source_factory=None, sync_cfg=None, on_section=None) -> dict:
+        """Comme `build`, mais les rushes qui se chevauchent dans le temps (plusieurs caméras) sont regroupés, synchronisés par l'audio puis montés
+        en MULTICAM avec choix d'angle automatique ; les autres rushes sont montés à plat. Tout, dans l'ordre chronologique, en UN geste d'annulation.
+        Renvoie un compte rendu (groupes, lignes de synchro, angles écartés)."""
+        from ..auto import multicam as M
+        from ..sync.sources import FileSource
+        d = parse_directive(prompt)
+        if d.kind != "build":
+            raise DirectiveError("ce n'est pas une demande de montage")
+        self.analyze(analyzer, [section] if section else None)
+        st = style or StyleParams(target_s=d.target_s)
+        durs = {m: r.duration for m, r in self.rushes.items()}
+        pool = [r for r in self.rushes.values() if section is None or r.group == section]
+        props = M.propose_groups(pool, only_section=section)
+        covered = {r.media for p in props for r in p.members}
+        report = {"groups": [], "plain": 0}
+        blocks = [("mc", p.start, p) for p in props]
+        rest = sorted((r for r in pool if r.media not in covered), key=lambda r: (M._t(r) or 0.0, r.media))
+        for r in rest:
+            blocks.append(("plain", M._t(r) or 0.0, r))
+        blocks.sort(key=lambda b: (b[1], b[0]))
+        if not blocks:
+            raise DirectiveError("aucun rush à monter")
+        pos0 = max([c.end for c in self.tl.clips_on("V1")], default=0)
+        with self.session.group(prompt, "auto", Scope(pos0, 10 ** 9)) as gid:
+            i = 0
+            while i < len(blocks):
+                kind, _, obj = blocks[i]
+                if kind == "plain":
+                    run = [obj]
+                    while i + 1 < len(blocks) and blocks[i + 1][0] == "plain":
+                        i += 1
+                        run.append(blocks[i][2])
+                    shots = plan_sequence(run, st)
+                    if shots:
+                        generate_first_edit(self.session, shots, label=prompt, durations=durs, on_section=on_section)
+                        report["plain"] += len(shots)
+                else:
+                    g = M.create_group(self.session, obj, durs)
+                    lines = M.sync_group(self.session, g, self.project.root, sync_cfg, source_factory=source_factory or FileSource)
+                    grp = self.tl.group(g)
+                    skipped = [a.id for a in grp.angles if not a.usable]
+                    moms = M.master_moments(self.rushes[obj.master], self.tl, g)
+                    if moms:
+                        picks = M.choose_angles(self.tl, g, min(a for a, _ in moms), max(b for _, b in moms), durs, st, moms)
+                        if picks:
+                            M.generate_multicam_edit(self.session, g, picks, label=prompt)
+                    report["groups"].append({"group": g, "name": obj.name, "angles": len(grp.angles), "skipped": skipped,
+                                             "sync": lines, "shots": len(picks) if moms else 0})
+                    if on_section:
+                        on_section(obj.name, 0, 0)
+                i += 1
+        return report
+
+    def add_music(self, path: Path | str, gain_db: float = -14.0, fade_out_s: float = 3.0) -> str:
+        """Pose une musique sous le montage (fichier lu en place, jamais copié ni modifié). Annulable ; modifiable comme tout plan audio."""
+        from ..auto.music import place_music
+        from ..probe import probe
+        p = Path(path)
+        p = p if p.is_absolute() else self.project.root / p
+        info = probe(p)
+        try:
+            media = p.resolve().relative_to(self.project.root.resolve()).as_posix()
+        except ValueError:
+            media = str(p.resolve())
+        return place_music(self.session, media, info.duration, gain_db, fade_out_s)
 
     def command(self, text: str, selection: Selection | None = None, style: StyleParams | None = None, analyzer: Analyzer | None = None
                 ) -> DirectiveResult:

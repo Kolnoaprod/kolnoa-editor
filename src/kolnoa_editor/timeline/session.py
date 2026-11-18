@@ -215,10 +215,13 @@ class Session:
     def group(self, label: str, origin: str, scope: "P.Scope | None" = None):
         """Regroupe plusieurs `do` (p. ex. une génération complète) : `undo_group()` les annule d'un seul geste, chaque pas restant
         annulable seul. Non imbriqué."""
-        if self._group is not None:
-            raise TimelineError("groupe déjà ouvert")
         if origin == "manuel":
             raise TimelineError("un groupe est réservé aux origines auto/directive")
+        if self._group is not None:                 # imbriqué : on rejoint le groupe en cours (un seul geste d'annulation pour l'ensemble)
+            if origin != self._group[1]:
+                raise TimelineError("origine différente de celle du groupe en cours")
+            yield self._group[0]
+            return
         self._group_seq += 1
         self._group = (f"g{self._group_seq:04d}", origin, scope)
         try:

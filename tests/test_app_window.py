@@ -35,7 +35,7 @@ def win(app, tmp_path):
 def test_rush_list_and_build_and_undo(win):
     assert win.rushes.count() == 3
     assert win.run_prompt("Monte-moi cette séquence")
-    assert win.ctl.tl.clips_on("V1") and "plans posés" in win.status.text()
+    assert win.ctl.tl.clips_on("V1") and "Montage posé" in win.status.text()
     win.undo()
     assert not win.ctl.tl.clips
 
@@ -75,3 +75,36 @@ def test_save_reopen_and_export(win, tmp_path):
     assert again.tl.canonical() == before
     win.export(str(tmp_path / "film.mp4"), "1080p")
     assert win.exported == [(tmp_path / "film.mp4", "1080p")]
+
+
+def test_multicam_player_slot_and_angle_switch(win, tmp_path):
+    from PySide6.QtWidgets import QLabel
+    from kolnoa_editor.timeline import Angle
+    from kolnoa_editor.timeline.model import MulticamGroup
+    from kolnoa_editor.timeline.ops import AddGroup, add_multicam_clip
+    from dataclasses import asdict
+    seeks = []
+
+    class Stub(QLabel):
+        class player:
+            @staticmethod
+            def seek(t): seeks.append(t)
+    win.player_factory = lambda ctl, gid: Stub("lecteur")
+    g = MulticamGroup("g001", "A", "g", [Angle("A", "a.mp4", offset=0.0, status="reference", method="reference", confidence=1.0),
+                                         Angle("B", "b.mp4", offset=2.0, status="ok", method="audio", confidence=1.0),
+                                         Angle("C", "c.mp4", offset=0.0, status="unsynced")])
+    win.ctl.session.do(AddGroup(asdict(g)))
+    win.ctl.session.do(add_multicam_clip(win.ctl.tl, "g001", "A", "V1", 0, 100, 5.0, clip_id="m1"))
+    win.refresh()
+    assert isinstance(win.player_view, Stub)                                          # lecteur affiché dès qu'un groupe existe
+    win.tlv.set_playhead(50)
+    assert seeks and abs(seeks[-1] - 50 / win.ctl.tl.fps) < 1e-9                       # la tête de lecture pilote le lecteur
+    win.tlv._select(["m1"])
+    assert win.angles_of_selection() == ["A", "B"]                                    # l'angle non synchronisé n'est pas proposé
+    assert win.switch_angle("B")
+    c = win.ctl.tl.clip("m1")
+    assert c.angle == "B" and c.media == "b.mp4" and abs(c.src_in - 3.0) < 1e-6        # même instant de groupe (5 s) → 3 s dans B
+    assert win.ctl.session.state_of("m1") == "manuel"
+    assert not win.switch_angle("C")                                                  # refus clair, rien ne change
+    win.undo()
+    assert win.ctl.tl.clip("m1").angle == "A"
