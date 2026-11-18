@@ -18,3 +18,6 @@ from .ops import (AddCrossfade, AddMaster, RemoveCrossfade, RemoveMaster, SetAud
 from .session import Session
 
 __all__ = [n for n in dir() if not n.startswith("_")]
+
+from .provenance import Mark, Scope, ScopeViolation  # noqa: E402,F401
+from .selection import Selection, timeline_signature  # noqa: E402,F401
