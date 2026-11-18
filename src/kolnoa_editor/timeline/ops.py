@@ -388,7 +388,7 @@ class RemoveMarker(Op):
         return f"- repère {self.marker_id}"
 
 
-_PROJECT_PROPS = {"title", "source_gain_db", "music"}
+_PROJECT_PROPS = {"title", "source_gain_db", "music", "fps", "resolution"}
 
 
 @register
@@ -401,8 +401,20 @@ class SetProject(Op):
         unknown = set(self.props) - _PROJECT_PROPS
         if unknown:
             raise TimelineError(f"propriétés de projet inconnues : {sorted(unknown)}")
-        old = {k: getattr(tl, k) for k in self.props}
-        for k, v in self.props.items():
+        props = dict(self.props)
+        if "fps" in props:
+            if int(props["fps"]) != tl.fps and tl.clips:
+                raise TimelineError("la cadence ne peut changer que sur une timeline sans plans (les coupes seraient déplacées)")
+            if int(props["fps"]) < 1:
+                raise TimelineError("cadence invalide")
+            props["fps"] = int(props["fps"])
+        if "resolution" in props:
+            w, h = props["resolution"]
+            if int(w) < 16 or int(h) < 16:
+                raise TimelineError("résolution invalide")
+            props["resolution"] = (int(w), int(h))
+        old = {k: getattr(tl, k) for k in props}
+        for k, v in props.items():
             setattr(tl, k, v)
         return SetProject(old)
 
