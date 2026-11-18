@@ -1,5 +1,7 @@
 # Première bêta Windows — état des lieux, blocages et plan (révision du 2026-11-18)
 
+> **Mise à jour 2026-11-18 (soir)** : le plan de développement est réévalué dans `docs/ARCHITECTURE_MONTAGE_AUTOMATIQUE.md` (montage automatique au centre) ; ce tableau d'état reste valable, l'ordre des jalons (§5) est remplacé par le §9 de ce document.
+
 Remplace la version du 17/11, que ce relevé corrige sur un point important (§1). Relevé fait sur le **sommet de la pile (#29)** et par simulation de fusion locale ; aucun code produit écrit depuis. Budget additionnel : **0 € définitif** ; la passerelle de l'issue #30 est abandonnée (PR #31 fermée).
 
 ## 1. Le constat qui change le plan
