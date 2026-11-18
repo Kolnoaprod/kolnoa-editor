@@ -94,8 +94,8 @@ def analyze_angle(path: Path, t_from: float, t_to: float, p: VisualParams, cache
     if t_to - t_from < p.slot_s * 0.5:
         return []
     st = path.stat()
-    key = hashlib.sha1(json.dumps([str(path.name), st.st_size, st.st_mtime_ns, round(t_from, 3), round(t_to, 3), p.slot_s, p.width, p.height,
-                                   p.faces, 2]).encode()).hexdigest()[:20]
+    key = hashlib.sha1(json.dumps([str(path.resolve()), st.st_size, st.st_mtime_ns, round(t_from, 3), round(t_to, 3), p.slot_s, p.width, p.height,
+                                   p.faces, 3]).encode()).hexdigest()[:20]
     cache = (cache_dir / f"{key}.json") if cache_dir else None
     if cache and cache.is_file():
         try:
@@ -111,6 +111,8 @@ def analyze_angle(path: Path, t_from: float, t_to: float, p: VisualParams, cache
     cmd = [ffmpeg_bin(), "-v", "error", "-ss", f"{t_from:.3f}", "-t", f"{t_to - t_from:.3f}", "-i", str(path), "-an", "-vf",
            f"fps=1/{p.slot_s},scale={p.width}:{p.height}", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
     r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"analyse visuelle ffmpeg échouée pour {path}: {r.stderr.decode(errors='replace')[-1000:]}")
     n = p.width * p.height
     buf = r.stdout
     out: list[Sample] = []
