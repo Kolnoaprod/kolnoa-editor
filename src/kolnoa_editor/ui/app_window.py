@@ -49,6 +49,7 @@ class AppWindow(QMainWindow):
         self.tlv.edited.connect(self._edited)
         self.tlv.rejected.connect(lambda m: self.say("Refusé : " + m))
         self.tlv.selectionChanged.connect(lambda ids: self._update_zone())
+        self.tlv.selectionChanged.connect(lambda ids: self.say(self.explain_selection() or self.status.text()))
         self.refresh()
 
     # --- construction ----------------------------------------------------------------------------------
@@ -154,6 +155,32 @@ class AppWindow(QMainWindow):
             if c.group:
                 out = [a.id for a in tl.group(c.group).angles if a.usable and a.kind == "video"]
         return out
+
+    def explain_selection(self) -> str:
+        """Pourquoi cet angle : motif, scores de chaque angle fiable, et alternatives (les non fiables sont dits écartés)."""
+        tl = self.ctl.tl
+        for cid in self.tlv.selection:
+            c = tl.clip(cid)
+            if not c.group:
+                continue
+            g = tl.group(c.group)
+            why = (c.extra or {}).get("angle_choice")
+            reliable = [a.id for a in g.angles if a.usable and a.kind == "video"]
+            out = [a.id for a in g.angles if not a.usable and a.kind == "video"]
+            txt = f"Angle {c.angle} — "
+            if c.angle and self.ctl.session.state_of(cid) == "manuel":
+                txt += "choisi à la main"
+            elif why:
+                txt += why["motif"]
+            else:
+                txt += "choix non documenté"
+            if why and why.get("scores"):
+                txt += " · scores : " + ", ".join(f"{k} {v:.2f}" for k, v in sorted(why["scores"].items()))
+            txt += f" · alternatives fiables : {', '.join(a for a in reliable if a != c.angle) or 'aucune'}"
+            if out:
+                txt += f" · écartés (synchro non fiable) : {', '.join(out)}"
+            return txt
+        return ""
 
     def switch_angle(self, angle_id: str) -> bool:
         """Change l'angle des plans multicam sélectionnés (même instant, même son maître). Un seul pas d'annulation ; protégé comme toute retouche manuelle."""
