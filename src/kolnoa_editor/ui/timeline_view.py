@@ -50,6 +50,8 @@ class TimelineView(QWidget):
         self.vp = L.Viewport()
         self.playhead = 0
         self.selection: list[str] = []
+        self.mark_in: int | None = None            # points d'entrée / sortie (zone de travail des consignes)
+        self.mark_out: int | None = None
         self._drag: dict | None = None
         self._trim: dict | None = None
         self._drop: dict | None = None
@@ -117,6 +119,7 @@ class TimelineView(QWidget):
         self._paint_trim(p)
         self._paint_drop(p)
         self._paint_ruler(p)
+        self._paint_range(p)
         x = self.vp.x_of(self.playhead)
         p.setPen(QPen(PLAYHEAD, 2))
         p.drawLine(QPoint(int(x), 0), QPoint(int(x), self.height()))
@@ -216,6 +219,23 @@ class TimelineView(QWidget):
                 done_x = int(self.vp.x_of(c.start + (pyr.duration - c.src_in) * self.tl.fps))
                 p.setPen(QPen(QColor(255, 255, 255, 70), 1, Qt.DotLine))
                 p.drawLine(max(x0, done_x), y + h // 2, x1, y + h // 2)
+
+    def set_marks(self, mark_in: int | None, mark_out: int | None) -> None:
+        self.mark_in, self.mark_out = mark_in, mark_out
+        self.update()
+
+    def _paint_range(self, p: QPainter) -> None:
+        a, b = self.mark_in, self.mark_out
+        if a is None and b is None:
+            return
+        col = QColor(80, 160, 255)
+        if a is not None and b is not None and b > a:
+            p.fillRect(QRectF(self.vp.x_of(a), 0, (b - a) * self.vp.zoom, self.height()), QColor(80, 160, 255, 40))
+        for f in (a, b):
+            if f is not None:
+                p.setPen(QPen(col, 2))
+                x = int(self.vp.x_of(f))
+                p.drawLine(x, 0, x, self.height())
 
     def _paint_ghost(self, p: QPainter) -> None:
         d = self._drag

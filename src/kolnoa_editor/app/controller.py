@@ -1,0 +1,122 @@
+"""Contrôleur de projet SANS interface : tout le workflow de bout en bout, utilisable par la fenêtre Qt, la ligne de commande et les tests.
+
+    ouvrir/créer → importer les rushes → « Monte-moi cette séquence » → consigne ciblée / retouche manuelle → enregistrer → rouvrir
+
+Il n'y a QU'UNE timeline et UNE Session : le monteur automatique, les consignes et la souris passent par les mêmes transactions."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable
+
+from ..auto import (DirectiveResult, EditContext, RushInfo, StyleParams, analyze_silences, apply_directive, generate_first_edit,
+                    parse_directive, plan_sequence, speech_moments)
+from ..auto.directives import DirectiveError
+from ..project import Project
+from ..scanner import SourceFile, load_library, refresh, save_library
+from ..timeline import Selection, Session, Timeline
+from ..timeline.model import Track
+
+Analyzer = Callable[[RushInfo, Project], list]
+
+
+def default_analyzer(r: RushInfo, project: Project) -> list:
+    """Analyse locale par ffmpeg (parole/silence). Un rush sans piste son n'a pas de moment : le planificateur lui donne un plan d'ambiance."""
+    if not r.has_audio:
+        return []
+    return speech_moments(r.duration, analyze_silences(project.root / r.media, r.duration))
+
+
+class ProjectController:
+    def __init__(self, project: Project, session: Session):
+        self.project, self.session = project, session
+        self.rushes: dict[str, RushInfo] = {}
+        self._load_rushes(load_library(project) if project.library_path.exists() else [])
+
+    # --- ouverture ----------------------------------------------------------
+    @classmethod
+    def open(cls, root: Path | str, data_dir: Path | str | None = None, title: str | None = None) -> "ProjectController":
+        project = Project(root, data_dir)
+        d = project.timeline_dir
+        if (d / "base.json").exists():
+            session = Session.open(d)
+        else:
+            tl = Timeline(title=title or project.root.name, tracks=[Track("V1", "video", "main"), Track("A1", "audio", "main")])
+            session = Session.create(d, tl)
+        return cls(project, session)
+
+    @property
+    def tl(self) -> Timeline:
+        return self.session.tl
+
+    # --- rushes ---------------------------------------------------------------
+    def _load_rushes(self, files: list[SourceFile]) -> None:
+        for f in files:
+            if f.missing or f.kind != "video" or not f.duration:
+                continue
+            self.rushes.setdefault(f.rel, RushInfo(f.rel, f.duration, f.start, f.group, f.device, bool(f.has_audio)))
+
+    def import_rushes(self, subdir: str | None = None, probe_media: bool = True) -> int:
+        """Scanne le dossier (lecture seule), met à jour la bibliothèque, retourne le nombre de rushes vidéo utilisables."""
+        files, _ = refresh(self.project, subdir, probe_media=probe_media)
+        save_library(self.project, files)
+        self._load_rushes(files)
+        return len(self.rushes)
+
+    def add_rushes(self, infos: list[RushInfo]) -> None:
+        """Injection directe (tests, import depuis une autre source)."""
+        for r in infos:
+            self.rushes[r.media] = r
+
+    def sequences(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for r in self.rushes.values():
+            out[r.group] = out.get(r.group, 0) + 1
+        return dict(sorted(out.items()))
+
+    def analyze(self, analyzer: Analyzer | None = None, groups: list[str] | None = None) -> None:
+        an = analyzer or default_analyzer
+        for r in self.rushes.values():
+            if (groups is None or r.group in groups) and not r.moments:
+                r.moments = an(r, self.project)
+
+    # --- montage automatique ----------------------------------------------------
+    def build(self, prompt: str = "Monte-moi cette séquence", group: str | None = None, style: StyleParams | None = None,
+              analyzer: Analyzer | None = None, on_section=None):
+        d = parse_directive(prompt)
+        if d.kind != "build":
+            raise DirectiveError("ce n'est pas une demande de montage")
+        groups = [group] if group else None
+        self.analyze(analyzer, groups)
+        st = style or StyleParams(target_s=d.target_s)
+        shots = plan_sequence(list(self.rushes.values()), st, group)
+        if not shots:
+            raise DirectiveError("aucun plan retenu : importez des rushes et vérifiez la sélection de séquence")
+        return generate_first_edit(self.session, shots, label=prompt, durations={m: r.duration for m, r in self.rushes.items()},
+                                   on_section=on_section)
+
+    def command(self, text: str, selection: Selection | None = None, style: StyleParams | None = None, analyzer: Analyzer | None = None
+                ) -> DirectiveResult:
+        d = parse_directive(text)
+        if d.kind == "build":
+            rep = self.build(text, None, style, analyzer)
+            return DirectiveResult("build", rep.shots, 0, f"{rep.shots} plans posés sur {len(rep.sections)} section(s)")
+        if selection is None:
+            raise DirectiveError("sélectionnez d'abord une zone ou des plans sur la timeline")
+        used = {c.media for c in self.tl.clips}
+        cut = [(m, r.duration) for m, r in self.rushes.items() if m not in used and r.duration >= 1.0]
+        return apply_directive(self.session, d, selection, EditContext(cutaways=cut))
+
+    # --- vie du projet ------------------------------------------------------------
+    def undo(self) -> str:
+        """Annule d'un geste la dernière génération/consigne (groupe), sinon le dernier pas manuel."""
+        if self._last_is_group():
+            return f"{len(self.session.undo_group())} pas annulés"
+        return self.session.undo()
+
+    def _last_is_group(self) -> bool:
+        return bool(self.session._undo and self.session._undo[-1].group)
+
+    def save(self, name: str | None = None) -> Path:
+        """Tout est déjà journalisé à chaque action ; `save` crée en plus un instantané nommé (jamais écrasé)."""
+        return self.session.snapshot(name or "enregistrement")
