@@ -16,5 +16,6 @@ from .ops import (AddCrossfade, AddMaster, RemoveCrossfade, RemoveMaster, SetAud
                   RemoveTrack, SetClipProps, SetProject, SetTrackProps, ShiftClips, SplitClip,
                   ShiftAfter, Transaction, TrimClip, execute, op_from_dict, ripple_delete, trim_head, trim_tail)
 from .session import Session
+from .flatten import Flattened, Issue, VideoSpan, check_flatten, flatten_video, visible_video_tracks
 
 __all__ = [n for n in dir() if not n.startswith("_")]
