@@ -17,7 +17,9 @@ from ..timeline.model import Angle, MulticamGroup, Timeline, TimelineError
 from ..timeline.ops import AddGroup, add_multicam_clip
 from .analysis import RushInfo, speech_moments
 from .builder import GenerationReport
+from .angles import AnglePick, choose_visual
 from .planner import StyleParams
+from .visual import AnalysisStats, VisualParams, analyze_angle
 
 
 def _t(r: RushInfo) -> float | None:
@@ -115,45 +117,51 @@ def sync_group(session: Session, gid: str, media_root, cfg=None, hint_tolerance:
     return lines + rep.lines
 
 
-@dataclass(frozen=True)
-class AnglePick:
-    g_start: float
-    g_end: float
-    angle: str
-
-
 def choose_angles(tl: Timeline, gid: str, g_from: float, g_to: float, durations: dict[str, float],
-                  style: StyleParams | None = None, moments: list[tuple[float, float]] | None = None) -> list[AnglePick]:
-    """Découpe [g_from, g_to] (axe du groupe) en plans de `shot_min`–`shot_max` s et choisit l'angle de chacun.
-    Règles : angle utilisable ET couvrant tout le plan ; jamais deux fois de suite le même si un autre existe ; sinon le moins utilisé ;
-    égalité → ordre des identifiants (déterministe). `moments` (axe du groupe) borne les plans à ce qui est sonore."""
-    st = style or StyleParams()
-    g = tl.group(gid)
-    usable = [a for a in g.angles if a.usable and a.kind == "video"]
-    smin, smax = max(0.3, st.shot_min / max(st.pace, 0.1)), max(0.5, st.shot_max / max(st.pace, 0.1))
-    spans = moments if moments is not None else [(g_from, g_to)]
+                  style: StyleParams | None = None, moments: list[tuple[float, float]] | None = None,
+                  samples: dict | None = None, params: VisualParams | None = None) -> list[AnglePick]:
+    """Choix d'angle sur l'axe du groupe. Avec `samples` (analyse visuelle) : qualité + hystérésis ; sans analyse (ou critères éteints) :
+    l'angle MAÎTRE sur toute la durée où il couvre, sinon le seul angle fiable couvrant — jamais d'alternance forcée.
+    `moments` (sonores) : un tronçon par moment ; deux moments séparés de ≤ 2 s ne font qu'un tronçon (la pause y rend la coupe moins coûteuse)."""
+    p = params or VisualParams()
+    if style is not None and params is None:
+        p = VisualParams(min_dwell_s=max(p.min_dwell_s, style.shot_min))
+    spans = _merge_spans(sorted(moments if moments is not None else [(g_from, g_to)]), 2.0)
     picks: list[AnglePick] = []
-    used: dict[str, int] = {}
-    prev = None
-    for a0, a1 in sorted(spans):
-        pos, end = max(a0, g_from), min(a1, g_to)
-        while end - pos >= smin:
-            L = min(smax, end - pos)
-            if end - pos - L < smin:
-                L = end - pos if end - pos <= smax * 1.25 else L
-            ok = []
-            for a in usable:
-                s, e = a.to_angle(pos), a.to_angle(pos + L)
-                if s >= 0 and e <= durations.get(a.media, 0.0) + 1e-6:
-                    ok.append(a)
-            if ok:
-                cand = [a for a in ok if a.id != prev] or ok
-                best = min(cand, key=lambda a: (used.get(a.id, 0), a.id))
-                used[best.id] = used.get(best.id, 0) + 1
-                picks.append(AnglePick(round(pos, 3), round(pos + L, 3), best.id))
-                prev = best.id
-            pos += L
+    for a0, a1, pauses in spans:
+        a0, a1 = max(a0, g_from), min(a1, g_to)
+        if a1 - a0 >= p.slot_s:
+            picks += choose_visual(tl, gid, a0, a1, durations, samples or {}, p if samples else VisualParams(**{**p.__dict__, "enabled": False}), pauses)
     return picks
+
+
+def _merge_spans(spans, gap):
+    out = []
+    for a, b in spans:
+        if out and a - out[-1][1] <= gap:
+            out[-1][2].append((out[-1][1], a))
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b, []])
+    return [(a, b, pz) for a, b, pz in out]
+
+
+def analyze_group(session: Session, gid: str, media_root, g_from: float, g_to: float, durations: dict[str, float],
+                  params: VisualParams, cache_dir=None, proxy_for: Callable | None = None) -> tuple[dict, AnalysisStats]:
+    """Échantillons visuels des angles fiables sur [g_from, g_to] (une passe ffmpeg par angle, mise en cache)."""
+    from pathlib import Path
+    stats = AnalysisStats()
+    out: dict = {}
+    for a in session.tl.group(gid).angles:
+        if not a.usable or a.kind != "video":
+            continue
+        t0, t1 = max(0.0, a.to_angle(g_from)), min(durations.get(a.media, 0.0), a.to_angle(g_to))
+        try:
+            src = (proxy_for(a.media) if proxy_for else None) or Path(media_root) / a.media      # proxy à jour s'il existe : bien moins coûteux à décoder
+            out[a.id] = analyze_angle(src, t0, t1, params, Path(cache_dir) if cache_dir else None, stats)
+        except Exception as e:                           # noqa: BLE001 — angle illisible : traité comme sans mesure (repli), dit dans le compte rendu
+            stats.notes.append(f"{a.id}: analyse impossible ({e})")
+    return out, stats
 
 
 def generate_multicam_edit(session: Session, gid: str, picks: list[AnglePick], track: str = "V1", at: int | None = None,
@@ -165,11 +173,16 @@ def generate_multicam_edit(session: Session, gid: str, picks: list[AnglePick], t
     fps = tl.fps
     pos = at if at is not None else max([c.end for c in tl.clips_on(track)], default=0)
     total = max(1, sum(max(1, round((p.g_end - p.g_start) * fps)) for p in picks))
+    if not picks:
+        return GenerationReport(0, [tl.group(gid).name], pos, pos, None)
     first = pos
     with session.group(label, "auto", Scope(pos, pos + total, (track,))) as grp:
         for p in picks:
             frames = max(1, round((p.g_end - p.g_start) * fps))
-            session.do(add_multicam_clip(session.tl, gid, p.angle, track, pos, frames, p.g_start), f"{p.angle} {p.g_start:.1f}s")
+            op = add_multicam_clip(session.tl, gid, p.angle, track, pos, frames, p.g_start)
+            if p.why:
+                op.clip["extra"] = {**(op.clip.get("extra") or {}), "angle_choice": p.why}
+            session.do(op, f"{p.angle} {p.g_start:.1f}s")
             pos += frames
     return GenerationReport(len(picks), [tl.group(gid).name], first, pos, grp if picks else None)
 

@@ -12,6 +12,7 @@ from typing import Callable
 from ..auto import (DirectiveResult, EditContext, RushInfo, StyleParams, analyze_silences, apply_directive, generate_first_edit,
                     parse_directive, plan_sequence, speech_moments)
 from ..auto.directives import DirectiveError
+from ..auto.visual import VisualParams
 from ..project import Project
 from ..scanner import SourceFile, load_library, refresh, save_library
 from ..timeline import Scope, Selection, Session, Timeline
@@ -98,7 +99,8 @@ class ProjectController:
                                    on_section=on_section)
 
     def build_with_multicam(self, prompt: str = "Monte-moi cette séquence", section: str | None = None, style: StyleParams | None = None,
-                            analyzer: Analyzer | None = None, source_factory=None, sync_cfg=None, on_section=None) -> dict:
+                            analyzer: Analyzer | None = None, source_factory=None, sync_cfg=None, on_section=None,
+                            visual=None) -> dict:
         """Comme `build`, mais les rushes qui se chevauchent dans le temps (plusieurs caméras) sont regroupés, synchronisés par l'audio puis montés
         en MULTICAM avec choix d'angle automatique ; les autres rushes sont montés à plat. Tout, dans l'ordre chronologique, en UN geste d'annulation.
         Renvoie un compte rendu (groupes, lignes de synchro, angles écartés)."""
@@ -141,16 +143,34 @@ class ProjectController:
                     grp = self.tl.group(g)
                     skipped = [a.id for a in grp.angles if not a.usable]
                     moms = M.master_moments(self.rushes[obj.master], self.tl, g)
+                    vp = visual if visual is not None else VisualParams()
+                    stats = None
                     if moms:
-                        picks = M.choose_angles(self.tl, g, min(a for a, _ in moms), max(b for _, b in moms), durs, st, moms)
+                        g0, g1 = min(a for a, _ in moms), max(b for _, b in moms)
+                        samples = None
+                        if vp.enabled:
+                            samples, stats = M.analyze_group(self.session, g, self.project.root, g0, g1, durs, vp,
+                                                            self.project.data / "analysis", self._fresh_proxy)
+                        picks = M.choose_angles(self.tl, g, g0, g1, durs, st, moms, samples, vp)
                         if picks:
                             M.generate_multicam_edit(self.session, g, picks, label=prompt)
                     report["groups"].append({"group": g, "name": obj.name, "angles": len(grp.angles), "skipped": skipped,
-                                             "sync": lines, "shots": len(picks) if moms else 0})
+                                             "sync": lines, "shots": len(picks) if moms else 0,
+                                             "analysis": None if stats is None else {"angles": stats.angles, "frames": stats.frames,
+                                                                                    "seconds": round(stats.seconds, 2), "cache_hits": stats.cache_hits,
+                                                                                    "peak_rss_mb": stats.peak_rss_mb, "notes": stats.notes}})
                     if on_section:
                         on_section(obj.name, 0, 0)
                 i += 1
         return report
+
+    def _fresh_proxy(self, media: str):
+        from ..proxies import proxy_state
+        orig, prox = self.project.root / media, self.project.proxy_path(media)
+        try:
+            return prox if proxy_state(orig, prox) == "ok" else None
+        except OSError:
+            return None
 
     def add_music(self, path: Path | str, gain_db: float = -14.0, fade_out_s: float = 3.0) -> str:
         """Pose une musique sous le montage (fichier lu en place, jamais copié ni modifié). Annulable ; modifiable comme tout plan audio."""

@@ -108,3 +108,24 @@ def test_multicam_player_slot_and_angle_switch(win, tmp_path):
     assert not win.switch_angle("C")                                                  # refus clair, rien ne change
     win.undo()
     assert win.ctl.tl.clip("m1").angle == "A"
+
+
+def test_explain_selection(win):
+    from kolnoa_editor.timeline import Angle
+    from kolnoa_editor.timeline.model import MulticamGroup
+    from kolnoa_editor.timeline.ops import AddGroup, add_multicam_clip
+    from dataclasses import asdict
+    win.player_factory = lambda ctl, gid: None
+    g = MulticamGroup("g001", "A", "g", [Angle("A", "a.mp4", status="reference", method="reference", confidence=1.0),
+                                         Angle("B", "b.mp4", offset=1.0, status="ok", method="audio", confidence=1.0),
+                                         Angle("C", "c.mp4", status="impossible", method="audio")])
+    win.ctl.session.do(AddGroup(asdict(g)))
+    op = add_multicam_clip(win.ctl.tl, "g001", "A", "V1", 0, 100, 5.0, clip_id="m1")
+    op.clip["extra"] = {"angle_choice": {"motif": "meilleure qualité visuelle (1.00 contre 0.45)", "scores": {"A": 0.45, "B": 1.0}, "analyse": "visuelle"}}
+    win.ctl.session.do(op, origin="auto", scope=__import__("kolnoa_editor.timeline", fromlist=["Scope"]).Scope(0, 100))
+    win.refresh()
+    win.tlv._select(["m1"])
+    t = win.explain_selection()
+    assert "meilleure qualité visuelle" in t and "A 0.45" in t and "alternatives fiables : B" in t and "écartés" in t and "C" in t
+    win.switch_angle("B")
+    assert "choisi à la main" in win.explain_selection()
