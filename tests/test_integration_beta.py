@@ -91,3 +91,28 @@ def test_project_takes_rush_format_and_refuses_fps_change_later(tmp_path):
         c.apply_format({"fps": 25})
     assert Selection and abs(probe(c.export(tmp_path / "f.mp4", resolution="1080p").output).fps - 50) < 0.5
     assert ProjectController.open(root, tmp_path / "d").tl.fps == 50
+
+
+def test_music_is_mixed_undoable_and_faded(tmp_path):
+    root = tmp_path / "m"
+    gen(root / "A" / "C1.MP4", "red", 440, 8)
+    music = tmp_path / "musique.wav"                                          # hors du dossier de rushes : lu en place
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "sine=frequency=330:duration=30", str(music)], check=True)
+    c = ProjectController.open(root, tmp_path / "d")
+    c.import_rushes()
+    c.build("Monte-moi cette séquence", None, StyleParams(shot_min=1.5, shot_max=3.0))
+    for x in list(c.tl.clips):                                                # on coupe le son des rushes : seule la musique doit s'entendre
+        c.session.do(SetClipProps(x.id, {"audio": "mute"}))
+    end = max(x.end for x in c.tl.clips_on("V1"))
+    cid = c.add_music(music, gain_db=-6.0, fade_out_s=2.0)
+    m = c.tl.clip(cid)
+    assert m.track == "A2" and m.start == 0 and m.end == end and m.fade_out == 2.0
+    out = tmp_path / "f.mp4"
+    c.export(out)
+    assert mean_volume(out) > -40                                             # la musique est bien dans le MP4
+    c.undo()
+    assert not c.tl.clips_on("A2")
+    (tmp_path / "vide").mkdir()
+    from kolnoa_editor.timeline import TimelineError
+    with pytest.raises(TimelineError):                                        # montage vide : refus clair
+        ProjectController.open(tmp_path / "vide", tmp_path / "d2").add_music(music)
