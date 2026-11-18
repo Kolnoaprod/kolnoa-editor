@@ -535,6 +535,39 @@ class SetClipAngle(Op):
         return f"~ {self.clip_id} : angle {self.angle}"
 
 
+# --- couleur ----------------------------------------------------------------
+@register
+@dataclass
+class SetColorGrade(Op):
+    """Pose, remplace ou retire (grade=None) le réglage de couleur d'une portée : global, clip:<id> ou
+    angle:<groupe>/<angle>. Non destructif : seul le projet change, jamais les médias."""
+    type: ClassVar[str] = "set_color_grade"
+    scope: str
+    grade: dict | None = None
+
+    def apply(self, tl):
+        from .color import ColorError, ColorGrade, check_scope
+        try:
+            check_scope(tl, self.scope)
+            new = ColorGrade.from_dict(self.grade).to_dict() if self.grade is not None else None
+        except ColorError as exc:
+            raise TimelineError(f"couleur : {exc}") from exc
+        if self.scope.startswith("clip:"):
+            _writable(tl, tl.clip(self.scope[5:]))
+        old = copy.deepcopy(tl.grades.get(self.scope))
+        if new is None:
+            tl.grades.pop(self.scope, None)
+        else:
+            tl.grades[self.scope] = new
+        return SetColorGrade(self.scope, old)
+
+    def describe(self):
+        if self.grade is None:
+            return f"~ couleur {self.scope} : retirée"
+        from .color import ColorGrade
+        return f"~ couleur {self.scope} : {ColorGrade.from_dict(self.grade).describe()}"
+
+
 # --- transaction ----------------------------------------------------------
 @register
 @dataclass

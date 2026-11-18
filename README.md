@@ -61,6 +61,7 @@ kolnoa multicam-sync $M g001 --dry-run     # synchro audio + dérive ; propositi
 kolnoa multicam-sync $M g001               # enregistre (annulable) ; ajouter --accept-visual 1 pour poser la proposition
 kolnoa multicam-align $M g001 DRONE --point 3.0 41.0      # alignement manuel par repères (2 repères = dérive)
 kolnoa multicam-nudge $M g001 DRONE +1     # image par image ; multicam-lock / multicam-accept / multicam-at
+kolnoa color-set $M clip:s012 --exposure 0.5 --saturation -5   # couleur non destructive (docs/COLOR.md)
 kolnoa sync-calibrate "G:\\Mon Drive\\…\\MARIAGE …" --scenario mairie --out C:\\Kolnoa\\calibration\\mairie --dry-run   # mesure sur de vrais rushes, LECTURE SEULE (docs/SYNC_CALIBRATION.md)
 ```
 

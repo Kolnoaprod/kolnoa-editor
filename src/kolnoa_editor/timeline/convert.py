@@ -12,6 +12,7 @@ from dataclasses import asdict
 
 from ..decision_list import DecisionList, Music, Segment
 from .model import Clip, Timeline, TimelineError, Track
+from .color import grade_warnings, stack_for_clip
 from .timebase import duration_frames, frames_to_seconds
 
 MAIN_TRACK = "V1"
@@ -63,13 +64,16 @@ def to_decision_list(tl: Timeline) -> tuple[DecisionList, list[str]]:
         warnings.append(f"réglages de la piste {main.id} (muet/gain) non exportés")
     segments: list[Segment] = []
     for c in ordered:
+        stack = [g.to_dict() for g in stack_for_clip(tl, c)]
         if c.extra:
             warnings.append(f"{c.id}: réglages avancés {sorted(c.extra)} non exportés")
         if c.gain_db:
             warnings.append(f"{c.id}: gain {c.gain_db} dB non exporté")
         end = round(c.src_in + frames_to_seconds(c.duration, tl.fps), 6)
         segments.append(Segment(id=c.id, clip=c.media, start=c.src_in, end=end, audio=c.audio,
-                                fade_in=c.fade_in, fade_out=c.fade_out, note=c.note, parent=c.parent))
+                                fade_in=c.fade_in, fade_out=c.fade_out, note=c.note, parent=c.parent,
+                                color=stack or None))
+    warnings.extend(grade_warnings(tl))
     if tl.markers:
         warnings.append(f"{len(tl.markers)} repère(s) non exporté(s) (sans effet sur le rendu)")
     dl = DecisionList(title=tl.title, version=tl.version, fps=tl.fps, resolution=tuple(tl.resolution),

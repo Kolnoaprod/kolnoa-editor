@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Callable
 
 from .decision_list import DecisionList, Segment
+from .grade import grade_filter
 from .ffmpeg import (CancelToken, Cancelled, FFmpegError, encoder_name, ffmpeg_bin, run,
                      video_encoder_args)
 from .preflight import PreflightError, has_errors, preflight
@@ -54,12 +55,23 @@ def _source_for(project: Project, seg: Segment, kind: str) -> Path:
     return original
 
 
-def _video_filter(dl: DecisionList, seg: Segment, kind: str) -> str:
+def _lut_resolver(project: Project | None):
+    def resolve(path: str) -> Path:
+        p = Path(path)
+        if p.is_absolute() or project is None:
+            return p
+        return project.root / p
+    return resolve
+
+
+def _video_filter(dl: DecisionList, seg: Segment, kind: str, project: Project | None = None) -> str:
     w, h = dl.resolution
     if kind == "proxy":
         w, h = (w // 2) // 2 * 2, (h // 2) // 2 * 2
+    grade = grade_filter(seg.color, _lut_resolver(project))
     chain = [
         f"scale={w}:{h}:force_original_aspect_ratio=decrease",
+        *([grade] if grade else []),   # avant le pad : les bandes noires ne sont pas étalonnées
         f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
         f"fps={dl.fps}:start_time=0",
         "tpad=stop_mode=clone:stop_duration=1",
@@ -86,12 +98,28 @@ def _audio_filter(dl: DecisionList, seg: Segment, muted: bool) -> str:
     return ",".join(chain)
 
 
+def _color_key(seg: Segment) -> list:
+    """Réglages + état des fichiers LUT : modifier la couleur ou le fichier LUT invalide le segment concerné."""
+    out: list = [seg.color]
+    for d in seg.color or []:
+        lut = (d or {}).get("lut")
+        if lut:
+            p = Path(lut["path"])
+            try:
+                st = p.stat()
+                out.append([str(p), st.st_size, st.st_mtime_ns])
+            except OSError:
+                out.append([str(p), None])
+    return out
+
+
 def segment_cache_key(dl: DecisionList, seg: Segment, kind: str, src: Path) -> str:
     st = src.stat()
     payload = json.dumps(
         [CACHE_VERSION, kind, seg.clip, str(src.name), st.st_size, st.st_mtime_ns,
          round(seg.start, 3), round(seg.end, 3), seg.audio, seg.fade_in, seg.fade_out,
-         dl.source_gain_db, dl.fps, list(dl.resolution), encoder_name()],
+         dl.source_gain_db, dl.fps, list(dl.resolution), encoder_name()]
+        + ([_color_key(seg)] if seg.color else []),   # sans couleur : clé identique à avant (caches conservés)
         sort_keys=True,
     )
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:24]
@@ -121,7 +149,7 @@ def _encode_segment(project: Project, dl: DecisionList, seg: Segment, kind: str,
         audio_map = ["-map", "1:a:0"]
     cmd += [
         "-map", "0:v:0", *audio_map,
-        "-vf", _video_filter(dl, seg, kind),
+        "-vf", _video_filter(dl, seg, kind, project),
         "-af", _audio_filter(dl, seg, muted=not use_source_audio) + f",apad=whole_dur={dur:.6f}",
         *video_encoder_args("proxy" if kind == "proxy" else "final"),
         "-r", str(dl.fps), "-g", str(dl.fps * 2),
