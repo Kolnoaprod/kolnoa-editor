@@ -104,7 +104,7 @@ class ProjectController:
         if selection is None:
             raise DirectiveError("sélectionnez d'abord une zone ou des plans sur la timeline")
         used = {c.media for c in self.tl.clips}
-        cut = [(m, r.duration) for m, r in self.rushes.items() if m not in used and r.duration >= 1.0]
+        cut = sorted(((m, r.duration) for m, r in self.rushes.items() if r.duration >= 1.0), key=lambda p: (p[0] in used, p[0]))   # rushes pas encore montés d'abord
         return apply_directive(self.session, d, selection, EditContext(cutaways=cut))
 
     # --- vie du projet ------------------------------------------------------------
@@ -116,6 +116,13 @@ class ProjectController:
 
     def _last_is_group(self) -> bool:
         return bool(self.session._undo and self.session._undo[-1].group)
+
+    def export(self, out: Path | str | None = None, kind: str = "final", on_progress=None, cancel=None):
+        """Exporte la timeline COURANTE en MP4 (toutes les pistes). Renvoie le rapport (durée, avertissements : rien n'est ignoré en silence)."""
+        from ..render_timeline import render_timeline
+        self.project.ensure()
+        out = Path(out) if out else self.project.renders_dir / f"{self.tl.title or 'film'}.mp4"
+        return render_timeline(self.tl, self.project.root, out, self.project.cache_dir, kind, on_progress, cancel)
 
     def save(self, name: str | None = None) -> Path:
         """Tout est déjà journalisé à chaque action ; `save` crée en plus un instantané nommé (jamais écrasé)."""

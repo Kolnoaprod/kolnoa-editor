@@ -200,15 +200,13 @@ class AppWindow(QMainWindow):
         self.say(f"Enregistré : {p.name} (le projet se rouvre exactement dans cet état).")
 
     def export(self, path: str | None = None) -> None:
-        if self.exporter is None:
-            self.say("L'export MP4 arrive avec le lot de rendu J1-b (PR séparée).")
-            return
         path = path or QFileDialog.getSaveFileName(self, "Exporter en MP4", str(self.ctl.project.renders_dir / "film.mp4"), "MP4 (*.mp4)")[0]
         if not path:
             return
         try:
-            rep = self.exporter(self.ctl, Path(path))
-            self.say(f"Exporté : {path}")
+            rep = (self.exporter or (lambda c, p: c.export(p)))(self.ctl, Path(path))
+            warn = getattr(rep, "warnings", None) or []
+            self.say(f"Exporté : {path}" + (f" — {len(warn)} avertissement(s) : {warn[0]}" if warn else ""))
         except Exception as e:                              # noqa: BLE001
             self.say(f"Export impossible : {e}")
             QMessageBox.warning(self, "Export", str(e))
