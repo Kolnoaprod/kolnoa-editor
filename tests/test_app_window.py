@@ -26,7 +26,7 @@ def win(app, tmp_path):
     c = ProjectController.open(root, tmp_path / "d")
     c.add_rushes(rushes())
     exported = []
-    w = AppWindow(c, exporter=lambda ctl, p: exported.append(p) or p, analyzer=lambda r, p: r.moments)
+    w = AppWindow(c, exporter=lambda ctl, p, r: exported.append((p, r)) or p, analyzer=lambda r, p: r.moments)
     w.exported = exported
     yield w
     w.close()
@@ -73,5 +73,5 @@ def test_save_reopen_and_export(win, tmp_path):
     before = win.ctl.tl.canonical()
     again = ProjectController.open(tmp_path / "m", tmp_path / "d")
     assert again.tl.canonical() == before
-    win.export(str(tmp_path / "film.mp4"))
-    assert win.exported == [tmp_path / "film.mp4"]
+    win.export(str(tmp_path / "film.mp4"), "1080p")
+    assert win.exported == [(tmp_path / "film.mp4", "1080p")]

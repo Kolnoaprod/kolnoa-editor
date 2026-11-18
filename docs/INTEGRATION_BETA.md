@@ -29,3 +29,9 @@ Seuils provisoires (−35 dB, plans 2–6 s) = paramètres de `StyleParams`, pas
 
 ## 6. Performances / GPU
 À mesurer sur la station Windows lors d'**une** session d'essai groupée (lecteur 4K50, export, NVENC) — pas par installateurs intermédiaires.
+
+## 7. Formats mixtes : 4K50 et 1080p50, export 4K ou 1080p
+- **Format du projet** : à l'import, un projet vide prend la cadence dominante des rushes (50) et la plus grande résolution (4K si présente) — `ProjectController.detect_format/apply_format` (op `SetProject`, annulable). La cadence ne peut plus changer une fois des plans posés (les coupes seraient déplacées).
+- **Rushes de tailles différentes** dans la même timeline : chacun est mis à l'échelle (bandes si le ratio diffère) vers la résolution de sortie.
+- **Export au choix** : `4k` (3840×2160), `1080p` (1920×1080) ou taille libre ; dialogue « Format d'export » dans la fenêtre ; 50 i/s conservées ; le cache de segments tient compte de la résolution (changer de format ré-encode, un même format réutilise).
+- Limite : un export 4K depuis des sources 1080p est un agrandissement (aucun détail créé). Débit réel 4K50 / NVENC à mesurer sur la station (7,5 s pour 2 s de 4K50 en encodage logiciel dans le bac à sable, non représentatif).

@@ -199,12 +199,22 @@ class AppWindow(QMainWindow):
         p = self.ctl.save()
         self.say(f"Enregistré : {p.name} (le projet se rouvre exactement dans cet état).")
 
-    def export(self, path: str | None = None) -> None:
+    def export(self, path: str | None = None, resolution: str | None = None) -> None:
+        if resolution is None:
+            from PySide6.QtWidgets import QInputDialog
+            labels = {"4K (3840×2160)": "4k", "1080p (1920×1080)": "1080p"}
+            native = tuple(self.ctl.tl.resolution)
+            names = list(labels)
+            cur = 0 if native[0] >= 3840 else 1
+            pick, ok = QInputDialog.getItem(self, "Format d'export", "Résolution du MP4 :", names, cur, False)
+            if not ok:
+                return
+            resolution = labels[pick]
         path = path or QFileDialog.getSaveFileName(self, "Exporter en MP4", str(self.ctl.project.renders_dir / "film.mp4"), "MP4 (*.mp4)")[0]
         if not path:
             return
         try:
-            rep = (self.exporter or (lambda c, p: c.export(p)))(self.ctl, Path(path))
+            rep = (self.exporter or (lambda c, p, r: c.export(p, resolution=r)))(self.ctl, Path(path), resolution)
             warn = getattr(rep, "warnings", None) or []
             self.say(f"Exporté : {path}" + (f" — {len(warn)} avertissement(s) : {warn[0]}" if warn else ""))
         except Exception as e:                              # noqa: BLE001

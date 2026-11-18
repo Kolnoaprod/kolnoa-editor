@@ -29,6 +29,25 @@ CACHE_VERSION = 1
 SAMPLE_RATE = 48000
 
 
+PRESETS: dict[str, tuple[int, int]] = {"4k": (3840, 2160), "1080p": (1920, 1080)}
+
+
+def resolve_resolution(tl: Timeline, resolution: "str | tuple[int, int] | None") -> tuple[int, int]:
+    """Résolution de SORTIE : préréglage (`4k`, `1080p`), couple (largeur, hauteur) ou, par défaut, celle de la timeline.
+    Indépendante des sources : un rush 1080p dans un export 4K est mis à l'échelle (et inversement) avec bandes si le ratio diffère."""
+    if resolution is None:
+        return tuple(tl.resolution)
+    if isinstance(resolution, str):
+        key = resolution.lower().replace(" ", "")
+        if key not in PRESETS:
+            raise ValueError(f"format inconnu : {resolution!r} (choix : {', '.join(PRESETS)})")
+        return PRESETS[key]
+    w, h = resolution
+    if w < 16 or h < 16 or w % 2 or h % 2:
+        raise ValueError("résolution invalide (dimensions paires, ≥ 16)")
+    return (int(w), int(h))
+
+
 class TimelineRenderError(RuntimeError):
     def __init__(self, message: str, issues: list | None = None):
         super().__init__(message)
@@ -43,25 +62,27 @@ class RenderReport:
     segments: int
     encoded: int
     reused: int
+    resolution: tuple[int, int]
     warnings: list[str] = field(default_factory=list)
 
 
-def _size(tl: Timeline, kind: str) -> tuple[int, int]:
-    w, h = tl.resolution
+def _size(tl: Timeline, kind: str, res: tuple[int, int] | None = None) -> tuple[int, int]:
+    w, h = res or tl.resolution
     if kind == "proxy":
         w, h = (w // 2) // 2 * 2, (h // 2) // 2 * 2
     return w, h
 
 
-def _span_key(span: VideoSpan, src: Path | None, tl: Timeline, kind: str) -> str:
+def _span_key(span: VideoSpan, src: Path | None, tl: Timeline, kind: str, res: tuple[int, int]) -> str:
     st = src.stat() if src else None
     payload = json.dumps([CACHE_VERSION, kind, span.media, st.st_size if st else 0, st.st_mtime_ns if st else 0,
-                          round(span.src_in, 6), span.end - span.start, tl.fps, list(_size(tl, kind)), encoder_name()])
+                          round(span.src_in, 6), span.end - span.start, tl.fps, list(_size(tl, kind, res)), encoder_name()])
     return hashlib.sha1(payload.encode()).hexdigest()[:24]
 
 
-def _encode_span(tl: Timeline, span: VideoSpan, src: Path | None, kind: str, out: Path, cancel: CancelToken | None) -> None:
-    w, h = _size(tl, kind)
+def _encode_span(tl: Timeline, span: VideoSpan, src: Path | None, kind: str, res: tuple[int, int], out: Path,
+                 cancel: CancelToken | None) -> None:
+    w, h = _size(tl, kind, res)
     frames = span.end - span.start
     if src is None:
         cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:r={tl.fps}"]
@@ -98,9 +119,11 @@ def preflight_timeline(tl: Timeline, media_root: Path) -> tuple[Flattened, list]
 
 
 def render_timeline(tl: Timeline, media_root: Path | str, out: Path | str, cache_dir: Path | str, kind: str = "final",
-                    on_progress: Callable[[int, int, str], None] | None = None, cancel: CancelToken | None = None) -> RenderReport:
+                    on_progress: Callable[[int, int, str], None] | None = None, cancel: CancelToken | None = None,
+                    resolution: "str | tuple[int, int] | None" = None) -> RenderReport:
     if kind not in ("proxy", "final"):
         raise ValueError("kind doit être 'proxy' ou 'final'")
+    res = resolve_resolution(tl, resolution)
     media_root, out, cache = Path(media_root), Path(out), Path(cache_dir)
     fl, issues = preflight_timeline(tl, media_root)
     errors = [i for i in issues if i.level == "error"]
@@ -123,13 +146,13 @@ def render_timeline(tl: Timeline, media_root: Path | str, out: Path | str, cache
             if on_progress:
                 on_progress(i, len(fl.spans), sp.clip_id or "noir")
             src = (media_root / sp.media) if sp.media else None
-            target = seg_dir / f"{_span_key(sp, src, tl, kind)}.mkv"
+            target = seg_dir / f"{_span_key(sp, src, tl, kind, res)}.mkv"
             if target.is_file() and target.stat().st_size > 0:
                 reused += 1
             else:
                 tmp = target.with_name(target.stem + f".{token}.part.mkv")
                 try:
-                    _encode_span(tl, sp, src, kind, tmp, cancel)
+                    _encode_span(tl, sp, src, kind, res, tmp, cancel)
                     os.replace(tmp, target)
                 finally:
                     tmp.unlink(missing_ok=True)
@@ -147,7 +170,7 @@ def render_timeline(tl: Timeline, media_root: Path | str, out: Path | str, cache
         if abs(actual - seconds) > 0.15:
             raise TimelineRenderError(f"durée inattendue : {actual:.2f} s au lieu de {seconds:.2f} s")
         os.replace(part, out)
-        return RenderReport(out, actual, fl.total, len(fl.spans), encoded, reused,
+        return RenderReport(out, actual, fl.total, len(fl.spans), encoded, reused, res,
                             [i.message for i in issues if i.level == "warning"] + list(mix.warnings))
     except Cancelled:
         log.warning("export annulé ; les segments déjà encodés restent en cache")

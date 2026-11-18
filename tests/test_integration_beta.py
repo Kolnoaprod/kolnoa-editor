@@ -72,3 +72,22 @@ def test_full_user_journey(tmp_path):
     assert all(abs(a - b) < 70 for a, b in zip(px, want)), (cut[0].media, px)     # le plan de coupe (V2) est bien à l'image
     assert again.tl.clip(v[0].id).note == "gardé" and again.session.state_of(v[0].id) == "manuel"
     assert not any("erreur" in w.lower() for w in rep.warnings)
+
+
+def test_project_takes_rush_format_and_refuses_fps_change_later(tmp_path):
+    root = tmp_path / "m"
+    p = root / "A" / "C1.MP4"
+    p.parent.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=red:s=640x360:r=50:d=4", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=4", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-shortest", str(p)], check=True)
+    c = ProjectController.open(root, tmp_path / "d")
+    assert c.tl.fps == 25
+    c.import_rushes()
+    assert c.tl.fps == 50 and tuple(c.tl.resolution) == (640, 360)          # cadence et taille repris des rushes
+    c.build("Monte-moi cette séquence", None, StyleParams(shot_min=1, shot_max=2))
+    from kolnoa_editor.timeline import TimelineError
+    with pytest.raises(TimelineError):
+        c.apply_format({"fps": 25})
+    assert Selection and abs(probe(c.export(tmp_path / "f.mp4", resolution="1080p").output).fps - 50) < 0.5
+    assert ProjectController.open(root, tmp_path / "d").tl.fps == 50

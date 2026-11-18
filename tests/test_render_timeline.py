@@ -78,3 +78,25 @@ def test_refuses_missing_media_and_empty_and_overrun(media, tmp_path):
     with pytest.raises(TimelineRenderError):
         render_timeline(tl_of([Clip("v1", "V1", "red.mp4", 0, 25 * 20, 0.0)]), media, tmp_path / "x.mp4", tmp_path / "c")
     assert not (tmp_path / "x.mp4").exists()
+
+
+def test_output_resolution_choice_with_mixed_source_sizes(tmp_path):
+    """Rushes de tailles différentes (un « 4K » et un « 1080p » à l'échelle du test, tous deux à 50 i/s) → même timeline, sortie au choix."""
+    def gen(path, color, size):
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"color=c={color}:s={size}:r=50:d=3", "-f", "lavfi",
+                        "-i", "sine=frequency=440:duration=3", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                        "-shortest", str(path)], check=True)
+    gen(tmp_path / "big.mp4", "red", "1280x720")
+    gen(tmp_path / "small.mp4", "blue", "640x360")
+    tl = Timeline(title="t", fps=50, resolution=(1280, 720), tracks=[Track("V1", "video"), Track("A1", "audio")],
+                  clips=[Clip("a", "V1", "big.mp4", 0, 50, 0.0, audio="mute"), Clip("b", "V1", "small.mp4", 50, 50, 0.0, audio="mute"),
+                         Clip("s", "A1", "big.mp4", 0, 100, 0.0)])
+    tl.validate()
+    for name, want in (("1080p", (1920, 1080)), ((640, 360), (640, 360)), (None, (1280, 720))):
+        out = tmp_path / f"o_{name}.mp4"
+        rep = render_timeline(tl, tmp_path, out, tmp_path / "cache", resolution=name)
+        i = probe(out)
+        assert (i.width, i.height) == want and rep.resolution == want
+        assert abs(i.duration - 2.0) < 0.15 and abs((i.fps or 0) - 50) < 0.5          # 50 i/s conservés
+    with pytest.raises(ValueError):
+        render_timeline(tl, tmp_path, tmp_path / "x.mp4", tmp_path / "cache", resolution="8k")
