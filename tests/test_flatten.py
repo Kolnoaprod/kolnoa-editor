@@ -87,7 +87,8 @@ def test_check_reports_errors_and_unused_clips():
     tl = TL([C("a", "V1", 0, 50), C("hidden", "V1", 50, 10), C("top", "V2", 50, 10), C("sp", "V1", 60, 10, extra={"speed": 2.0})])
     issues = check_flatten(tl, media_exists=lambda m: m != "gone.mov", source_len=lambda m: 4.0)
     msgs = " | ".join(f"{i.level}:{i.message}" for i in issues)
-    assert "hidden est entièrement recouvert" in msgs and "vitesse" in msgs and "dépasse la fin de la source" in msgs
+    assert "hidden est entièrement recouvert" in msgs and "dépasse la fin de la source" in msgs
+    assert "vitesse" not in msgs  # 2× est désormais une vitesse supportée
     tl2 = TL([C("a", "V1", 0, 10, media="gone.mov")])
     assert any(i.level == "error" and "introuvable" in i.message for i in check_flatten(tl2, media_exists=lambda m: False))
 
