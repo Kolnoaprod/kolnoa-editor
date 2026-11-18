@@ -117,8 +117,8 @@ def check_flatten(tl: Timeline, fl: Flattened | None = None, media_exists: Calla
         if tl.track(c.track).kind != "video" or c.track not in visible_video_tracks(tl):
             continue
         speed = (c.extra or {}).get('speed', 1.0)
-        if not isinstance(speed, (int, float)) or not 0.25 <= speed <= 4.0 or speed != speed:
-            out.append(Issue('error', f'{c.id}: vitesse invalide (plage 0,25×–4×)'))
+        if not isinstance(speed, (int, float)) or not 0.5 <= speed <= 2.0 or speed != speed:
+            out.append(Issue('error', f'{c.id}: vitesse invalide (plage 0,5×–2×)'))
             continue
         if speed != 1.0 and c.audio == 'group':
             out.append(Issue('error', f'{c.id}: ralentissement multicam avec audio maître non encore supporté'))
