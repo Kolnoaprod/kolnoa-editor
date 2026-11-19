@@ -93,7 +93,8 @@ def build_mix_plan(tl: Timeline) -> MixPlan:
         if c.audio == "group":
             evs = _group_events(tl, c, gain, sw, plan)
         else:
-            evs = [MixEvent(c.id, c.track, c.media, c.start / tl.fps, c.duration / tl.fps, c.src_in, 1.0, gain, c.strips,
+            evs = [MixEvent(c.id, c.track, c.media, c.start / tl.fps, c.duration / tl.fps, c.src_in,
+                            float((c.extra or {}).get('speed', 1.0)), gain, c.strips,
                             c.fade_in, c.fade_in_curve, c.fade_out, c.fade_out_curve)]
         if evs:
             plan.events += evs
@@ -199,7 +200,9 @@ def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) 
             ch = infos[m].channels
             src_dur = e.duration * e.tempo
             chain = [f"atrim=start={e.src_start:.6f}:duration={src_dur:.6f}", "asetpts=PTS-STARTPTS"]
-            if abs(e.tempo - 1.0) > 1e-9:
+            if abs(e.tempo - 1.0) > 1e-9 and abs(e.tempo - 1.0) > 0.01:
+                chain.append(f'atempo={e.tempo:.8f}')
+            elif abs(e.tempo - 1.0) > 1e-9:
                 # Une dérive est une erreur d'horloge d'échantillonnage : on la corrige en rééchantillonnant (pas d'atempo,
                 # dont les fenêtres déplacent les transitoires de plusieurs ms). Sur-échantillonnage ×4 avant `asetrate`
                 # pour que l'arrondi à l'Hz entier ne laisse que ~2 ppm d'erreur. Hauteur décalée de la dérive (qq cents).

@@ -5,7 +5,7 @@ nombre d'images EXACT dans un cache (clé = source, plage, cadence, résolution,
 sans ré-encodage → mixage audio de TOUTES les pistes (`render_mix`, WAV 24 bits) → assemblage AAC. Fichiers `.part` renommés à la fin ;
 la durée du fichier produit est vérifiée. Les rushes originaux ne sont jamais écrits.
 
-Pas encore pris en charge (signalé, jamais ignoré en silence) : transitions/fondus vidéo, vitesse ≠ 1, étalonnage."""
+Pas encore pris en charge : transitions/fondus vidéo, étalonnage, vitesse variable avec audio maître multicam."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from .timeline.audio_mix import render_mix
 from .timeline.flatten import Flattened, VideoSpan, check_flatten, flatten_video
 
 log = logging.getLogger("kolnoa.render")
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 SAMPLE_RATE = 48000
 
 
@@ -76,7 +76,7 @@ def _size(tl: Timeline, kind: str, res: tuple[int, int] | None = None) -> tuple[
 def _span_key(span: VideoSpan, src: Path | None, tl: Timeline, kind: str, res: tuple[int, int]) -> str:
     st = src.stat() if src else None
     payload = json.dumps([CACHE_VERSION, kind, span.media, st.st_size if st else 0, st.st_mtime_ns if st else 0,
-                          round(span.src_in, 6), span.end - span.start, tl.fps, list(_size(tl, kind, res)), encoder_name()])
+                          round(span.src_in, 6), span.speed, span.end - span.start, tl.fps, list(_size(tl, kind, res)), encoder_name()])
     return hashlib.sha1(payload.encode()).hexdigest()[:24]
 
 
@@ -89,7 +89,7 @@ def _encode_span(tl: Timeline, span: VideoSpan, src: Path | None, kind: str, res
         vf = "setsar=1,format=yuv420p"
     else:
         cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", "-ss", f"{span.src_in:.6f}", "-i", str(src)]
-        vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={tl.fps}:start_time=0,"
+        vf = (f"setpts=(PTS-STARTPTS)/{span.speed:.8f},scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={tl.fps}:start_time=0,"
               "tpad=stop_mode=clone:stop_duration=1,setsar=1,format=yuv420p")
     cmd += ["-map", "0:v:0", "-an", "-vf", vf, *video_encoder_args("proxy" if kind == "proxy" else "final"),
             "-r", str(tl.fps), "-g", str(tl.fps * 2), "-frames:v", str(frames), str(out)]

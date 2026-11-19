@@ -26,6 +26,7 @@ class VideoSpan:
     media: str | None = None
     src_in: float = 0.0        # secondes dans le média, à l'image `start` du segment
     offset: int = 0            # images déjà « consommées » du plan avant ce segment (≥ 0)
+    speed: float = 1.0         # secondes source / seconde timeline
 
     @property
     def duration(self) -> int:
@@ -92,7 +93,8 @@ def flatten_video(tl: Timeline) -> Flattened:
                 gaps.append((a, b))
         else:
             off = a - top.start
-            spans.append(VideoSpan(a, b, top.id, top.track, top.media, round(top.src_in + frames_to_seconds(off, tl.fps), 6), off))
+            spans.append(VideoSpan(a, b, top.id, top.track, top.media, round(top.src_in + frames_to_seconds(off, tl.fps) * float((top.extra or {}).get('speed', 1.0)), 6), off,
+                                   float((top.extra or {}).get('speed', 1.0))))
     if gaps:
         warnings.append("zones sans image (noir) : " + ", ".join(f"{a}–{b}" for a, b in gaps[:5]) + (" …" if len(gaps) > 5 else ""))
     return Flattened(spans, total, gaps, warnings)
@@ -114,14 +116,18 @@ def check_flatten(tl: Timeline, fl: Flattened | None = None, media_exists: Calla
     for c in tl.clips:
         if tl.track(c.track).kind != "video" or c.track not in visible_video_tracks(tl):
             continue
-        if (c.extra or {}).get("speed") not in (None, 1, 1.0):
-            out.append(Issue("error", f"{c.id}: vitesse ≠ 1 non supportée au rendu"))
+        speed = (c.extra or {}).get('speed', 1.0)
+        if not isinstance(speed, (int, float)) or not 0.5 <= speed <= 2.0 or speed != speed:
+            out.append(Issue('error', f'{c.id}: vitesse invalide (plage 0,5×–2×)'))
+            continue
+        if speed != 1.0 and c.audio == 'group':
+            out.append(Issue('error', f'{c.id}: ralentissement multicam avec audio maître non encore supporté'))
         if c.id not in used:
             out.append(Issue("warning", f"{c.id} est entièrement recouvert par une piste supérieure : absent du rendu"))
         if media_exists is not None and not media_exists(c.media):
             out.append(Issue("error", f"{c.id}: média introuvable ({c.media})"))
         elif source_len is not None:
             n = source_len(c.media)
-            if n is not None and c.src_in + c.duration / tl.fps > n + 1e-3:
-                out.append(Issue("error", f"{c.id}: dépasse la fin de la source ({c.src_in + c.duration / tl.fps:.3f} s > {n:.3f} s)"))
+            if n is not None and c.src_in + c.duration / tl.fps * speed > n + 1e-3:
+                out.append(Issue("error", f"{c.id}: dépasse la fin de la source ({c.src_in + c.duration / tl.fps * speed:.3f} s > {n:.3f} s)"))
     return out
