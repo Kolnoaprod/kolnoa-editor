@@ -31,3 +31,9 @@ def test_demo_is_reproducible_and_data_dir_is_outside_rushes(tmp_path):
     assert m.make_demo(tmp_path / "demo") == a                      # idempotent
     d = m.data_dir_for(tmp_path / "demo")
     assert tmp_path not in d.parents and d.name.startswith("demo-")
+
+
+def test_filter_script_option_is_detected_not_assumed():
+    from kolnoa_editor.timeline import audio_mix
+    a = audio_mix._filter_script_args("g.txt")
+    assert a[1] == "g.txt" and a[0] in ("-filter_complex_script", "-/filter_complex")
