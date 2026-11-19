@@ -9,10 +9,11 @@ Lecteur multicam intégré : lot suivant (le composant existe : `MulticamView`).
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
@@ -20,6 +21,7 @@ from ..app import ProjectController
 from ..auto.playhead import selection_from_playhead
 from ..timeline import Selection, TimelineError
 from .peak_service import PeakService
+from .preview import frame_request, grab_frame
 from .timeline_view import TimelineView
 
 
@@ -44,10 +46,28 @@ class AppWindow(QMainWindow):
         self.prompt.setPlaceholderText("Dites ce que vous voulez : « Monte-moi cette séquence », « raccourcis cette partie de 5 s », "
                                        "« accélère le rythme », « remplace par un plan de coupe »")
         self.status = QLabel("Prêt.")
+        self.preview = QLabel("Aperçu : placez la tête de lecture sur un plan")
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setMinimumHeight(240)
+        self.preview.setStyleSheet("background:#111;color:#888")
+        self.timecode = QLabel("00:00:00:00")
+        self.play_btn = QPushButton("▶ Lecture")
+        self.play_btn.clicked.connect(self.toggle_play)
+        self._playing = False
+        self._play_t0 = 0.0
+        self._play_f0 = 0
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(30)
+        self._ticker.timeout.connect(self._tick)
+        self._grab_timer = QTimer(self)
+        self._grab_timer.setSingleShot(True)
+        self._grab_timer.setInterval(60)
+        self._grab_timer.timeout.connect(self._update_preview)
         self.zone = QLabel("Zone : aucune  ·  I / O pour poser l'entrée / la sortie")
         self.mark_in = self.mark_out = None
         self._build_ui()
         self.tlv.edited.connect(self._edited)
+        self.tlv.playheadChanged.connect(self._on_playhead)
         self.tlv.rejected.connect(lambda m: self.say("Refusé : " + m))
         self.tlv.selectionChanged.connect(lambda ids: self._update_zone())
         self.tlv.selectionChanged.connect(lambda ids: self.say(self.explain_selection() or self.status.text()))
@@ -72,6 +92,10 @@ class AppWindow(QMainWindow):
             a.setShortcut(QKeySequence(key))
             a.triggered.connect(lambda _=False, fn=fn: fn())
             e.addAction(a)
+        a = QAction("Lecture / pause", self)
+        a.setShortcut(QKeySequence("Space"))
+        a.triggered.connect(lambda _=False: self.toggle_play())
+        e.addAction(a)
         bar = QHBoxLayout()
         b = QPushButton("Monte-moi cette séquence")
         b.clicked.connect(lambda: self.run_prompt("Monte-moi cette séquence"))
@@ -87,6 +111,12 @@ class AppWindow(QMainWindow):
         lw = QWidget()
         lw.setLayout(left)
         self.view_box = QVBoxLayout()
+        self.view_box.addWidget(self.preview, 1)
+        tb = QHBoxLayout()
+        tb.addWidget(self.play_btn)
+        tb.addWidget(self.timecode)
+        tb.addStretch(1)
+        self.view_box.addLayout(tb)
         vb = QWidget()
         vb.setLayout(self.view_box)
         self.vsplit = QSplitter(Qt.Vertical)
@@ -142,6 +172,55 @@ class AppWindow(QMainWindow):
         if self.player_view is not None:
             self.view_box.addWidget(self.player_view)
             self.tlv.playheadChanged.connect(self._seek_player)
+
+    # --- transport + aperçu image (tout montage, multicam ou non) ----------------------------------------
+    def toggle_play(self) -> None:
+        if self._playing:
+            self.pause()
+            return
+        total = max((c.end for c in self.ctl.tl.clips), default=0)
+        if total <= 0:
+            self.say("Rien à lire : importez des rushes puis lancez « Monte-moi cette séquence ».")
+            return
+        if self.tlv.playhead >= total:
+            self.tlv.set_playhead(0)
+        self._playing, self._play_t0, self._play_f0 = True, time.monotonic(), self.tlv.playhead
+        self.play_btn.setText("⏸ Pause")
+        self._ticker.start()
+
+    def pause(self) -> None:
+        self._playing = False
+        self._ticker.stop()
+        self.play_btn.setText("▶ Lecture")
+
+    def _tick(self) -> None:
+        total = max((c.end for c in self.ctl.tl.clips), default=0)
+        f = self._play_f0 + int((time.monotonic() - self._play_t0) * self.ctl.tl.fps)
+        if f >= total:
+            self.tlv.set_playhead(max(0, total - 1))
+            self.pause()
+            return
+        self.tlv.set_playhead(f)
+
+    def _on_playhead(self, frame: int) -> None:
+        fps = self.ctl.tl.fps
+        s = frame // fps
+        self.timecode.setText(f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}:{frame % fps:02d}")
+        if not self._grab_timer.isActive():
+            self._grab_timer.start()
+
+    def _update_preview(self) -> None:
+        req = frame_request(self.ctl.tl, self.tlv.playhead)
+        if req is None:
+            self.preview.setPixmap(QPixmap())
+            self.preview.setText("Noir (aucun plan à cette image)")
+            return
+        png = grab_frame(self.ctl.project.root, req[0], req[1])
+        pm = QPixmap()
+        if png and pm.loadFromData(png):
+            self.preview.setPixmap(pm.scaled(self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            self.preview.setText("Image indisponible (rush illisible ou introuvable)")
 
     def _seek_player(self, frame: int) -> None:
         pv = self.player_view

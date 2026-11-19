@@ -1,0 +1,58 @@
+name: Kolnoa Editor V0.1 (EXE portable Windows)
+
+# Fabrique KolnoaEditor.exe (éditeur complet) dans un zip, le vérifie par un autotest du parcours complet, puis le dépose en artefact du run.
+# Ne fusionne rien, ne publie aucune release : le zip se télécharge depuis la page du run (onglet Actions → Artifacts).
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/v0.1-windows]
+    paths: ["src/**", "tools/winapp/**", ".github/workflows/windows-editor-v01.yml", "docs/V0_1_BILAN.md"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: Dépendances
+        run: python -m pip install pyinstaller PySide6 numpy psutil pytest
+      - name: ffmpeg (build statique gyan.dev, essentials)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force tools/winapp/ffmpeg_bin | Out-Null
+          Invoke-WebRequest https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile ff.zip
+          Expand-Archive ff.zip -DestinationPath ffx
+          Copy-Item ffx/*/bin/ffmpeg.exe, ffx/*/bin/ffprobe.exe tools/winapp/ffmpeg_bin/
+          & tools/winapp/ffmpeg_bin/ffmpeg.exe -hide_banner -filters | Select-String "vidstab|minterpolate|zscale"
+      - name: Tests du parcours (Windows, Qt hors écran)
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\tools\winapp\ffmpeg_bin;$env:PATH"
+          $env:QT_QPA_PLATFORM = "offscreen"
+          python -m pip install -e .
+          python -m pytest tests/test_v01_transport.py tests/test_app_window.py tests/test_integration_beta.py tests/test_render_timeline.py -q
+      - name: PyInstaller
+        shell: cmd
+        run: >
+          python -m PyInstaller --noconfirm --onefile --windowed --name KolnoaEditor --paths src
+          --add-binary "tools\winapp\ffmpeg_bin\ffmpeg.exe;bin" --add-binary "tools\winapp\ffmpeg_bin\ffprobe.exe;bin"
+          --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.Qt3DCore tools\winapp\kolnoa_editor_app.py
+      - name: Autotest de l'EXE (import, montage, consigne, enregistrement, réouverture, export 1080p, aperçu)
+        shell: pwsh
+        run: |
+          $p = Start-Process dist/KolnoaEditor.exe -ArgumentList "--selftest" -PassThru -Wait -RedirectStandardOutput selftest.txt
+          Get-Content selftest.txt
+          "code de sortie : $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "autotest de l'EXE échoué" }
+      - name: Zip (EXE + mode d'emploi)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force pkg | Out-Null
+          Copy-Item dist/KolnoaEditor.exe pkg/
+          Copy-Item docs/V0_1_BILAN.md pkg/LISEZMOI.md
+          Compress-Archive -Path pkg/* -DestinationPath KolnoaEditor_V0.1.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KolnoaEditor_V0.1
+          path: KolnoaEditor_V0.1.zip
