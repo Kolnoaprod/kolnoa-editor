@@ -59,8 +59,9 @@ def test_zone_in_out_drives_directive_and_marks(win):
 
 def test_selection_by_clicks_and_errors_shown(win):
     win.run_prompt("Monte-moi cette séquence")
-    assert not win.run_prompt("raccourcis de moitié")                 # rien de sélectionné : message, pas d'exception
-    assert "sélectionnez" in win.status.text().lower()
+    win.tlv.set_playhead(max(c.end for c in win.ctl.tl.clips_on("V1")) + 10)
+    assert not win.run_prompt("raccourcis de moitié")                 # tête hors plan : refus
+    assert "aucun plan" in win.status.text().lower()
     assert not win.run_prompt("fais-moi un café")
     ids = [c.id for c in win.ctl.tl.clips_on("V1")[:3]]
     win.tlv._select(ids)
@@ -129,3 +130,17 @@ def test_explain_selection(win):
     assert "meilleure qualité visuelle" in t and "A 0.45" in t and "alternatives fiables : B" in t and "écartés" in t and "C" in t
     win.switch_angle("B")
     assert "choisi à la main" in win.explain_selection()
+
+
+def test_prompt_at_playhead_without_explicit_selection(win):
+    assert win.run_prompt("Monte-moi cette séquence")
+    before = {c.id: c.duration for c in win.ctl.tl.clips_on("V1")}
+    first = win.ctl.tl.clips_on("V1")[0]
+    win.tlv.set_playhead(first.start)
+    assert not win.tlv.selection
+    assert win.run_prompt("raccourcis de moitié")
+    after = {c.id: c.duration for c in win.ctl.tl.clips_on("V1")}
+    assert after[first.id] < before[first.id]
+    assert all(after[cid] == duration for cid, duration in before.items() if cid != first.id)
+    win.undo()
+    assert {c.id: c.duration for c in win.ctl.tl.clips_on("V1")} == before
