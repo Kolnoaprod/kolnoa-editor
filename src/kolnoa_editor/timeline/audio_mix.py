@@ -145,6 +145,22 @@ def _group_events(tl: Timeline, c: Clip, gain: float, sw: float, plan: MixPlan) 
     return evs
 
 
+_SCRIPT_OPT: str | None = None
+
+
+def _filter_script_args(path: str) -> list[str]:
+    """Graphe de filtres lu depuis un fichier. FFmpeg ≥ 7.1 a retiré `-filter_complex_script` au profit de `-/filter_complex` (trouvé par la CI
+    Windows, build FFmpeg récent) : on teste une fois ce que le binaire accepte au lieu de supposer une version."""
+    global _SCRIPT_OPT
+    if _SCRIPT_OPT is None:
+        try:
+            h = subprocess.run(["ffmpeg", "-hide_banner", "-h", "full"], capture_output=True, text=True, timeout=30).stdout
+        except (OSError, subprocess.SubprocessError):
+            h = ""
+        _SCRIPT_OPT = "-filter_complex_script" if "filter_complex_script" in h else "-/filter_complex"
+    return [_SCRIPT_OPT, path]
+
+
 # --- sondes ---------------------------------------------------------------------------------------
 @dataclass
 class AudioInfo:
@@ -309,7 +325,7 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
         cmd = ["ffmpeg", "-y", "-v", "error"]
         for m in media:
             cmd += ["-i", str(media_root / m)]
-        graph_cmd = ["-filter_complex_script", str(script), "-map", "[out]"]
+        graph_cmd = [*_filter_script_args(str(script)), "-map", "[out]"]
         _run(cmd + graph_cmd + ["-t", f"{total:.6f}", "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(dry)])
         before = measure_loudness(dry)
         st = tl.audio_settings
