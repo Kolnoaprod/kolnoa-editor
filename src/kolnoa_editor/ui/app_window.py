@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QLis
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
+from ..auto.playhead import selection_from_playhead
 from ..timeline import Selection, TimelineError
 from .peak_service import PeakService
 from .timeline_view import TimelineView
@@ -238,7 +239,7 @@ class AppWindow(QMainWindow):
             return Selection.range(tl, self.mark_in, self.mark_out)
         if self.tlv.selection:
             return Selection.of_clips(tl, self.tlv.selection)
-        return None
+        return selection_from_playhead(tl, self.tlv.playhead)
 
     # --- actions ------------------------------------------------------------------------------------------
     def import_rushes(self, folder: str | None = None) -> None:
