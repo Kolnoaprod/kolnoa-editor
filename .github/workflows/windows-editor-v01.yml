@@ -21,7 +21,16 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force tools/winapp/ffmpeg_bin | Out-Null
-          Invoke-WebRequest https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip -OutFile ff.zip
+          $urls = @("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+                    "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip")
+          $ok = $false
+          foreach ($u in $urls) {
+            foreach ($try in 1..3) {
+              try { Invoke-WebRequest $u -OutFile ff.zip; $ok = $true; break } catch { Write-Host "échec $u (essai $try) : $($_.Exception.Message.Split([char]10)[0])"; Start-Sleep 10 }
+            }
+            if ($ok) { break }
+          }
+          if (-not $ok) { throw "ffmpeg introuvable (toutes les sources ont échoué)" }
           Expand-Archive ff.zip -DestinationPath ffx
           Copy-Item ffx/*/bin/ffmpeg.exe, ffx/*/bin/ffprobe.exe tools/winapp/ffmpeg_bin/
           & tools/winapp/ffmpeg_bin/ffmpeg.exe -hide_banner -filters | Select-String "vidstab|minterpolate|zscale"
