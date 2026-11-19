@@ -1,7 +1,7 @@
 # Kolnoa Editor V0.1 — lisez-moi et bilan
 
-> **État honnête** : tout ce qui est marqué « fonctionnel » l'est *sous Linux, sur rushes synthétiques*. La CI Windows (workflow `windows-editor-v01`)
-> rejoue les tests et l'autotest de l'EXE sous Windows ; **la validation sur votre PC et vos vrais rushes reste à faire**.
+> **État honnête** : « fonctionnel » = vérifié sur rushes synthétiques, sous Linux **et** sous Windows (runner GitHub `windows-latest`, EXE PyInstaller lancé avec `--selftest` : import → montage → consigne → réouverture → export 1080p → aperçu, code 0).
+> **La validation sur votre PC (RTX A4500) et vos vrais rushes reste à faire.** FFmpeg Windows embarqué : `vidstabdetect/vidstabtransform` et `minterpolate` présents.
 
 ## Lancer
 1. Télécharger `KolnoaEditor_V0.1.zip` (page du run GitHub Actions « Kolnoa Editor V0.1 », section *Artifacts*), dézipper.
@@ -20,7 +20,7 @@
 ## Les 9 points de la V0.1
 | # | Besoin | État | Détail |
 |---|---|---|---|
-| 1 | Application Windows | **Partiel** | EXE fabriqué et autotesté par la CI ; non validé sur votre machine. |
+| 1 | Application Windows | **Partiel** | EXE (≈150 Mo zippé) fabriqué et autotesté sous Windows par la CI ; non essayé sur votre machine. |
 | 2 | Ouvrir un projet, importer Sony / Osmo / drone | **Partiel** | Import de dossier (mp4, mov, mxf, mts, m4v), cadence/taille détectées. Aucun essai sur de vrais fichiers Osmo/drone. |
 | 3 | Visualiser rushes et timeline | **Fonctionnel** | Liste par séquence, timeline avec formes d'onde. |
 | 4 | Lire / pause / tête de lecture | **Partiel** | Lecture = tête qui avance + **image** (pas de son en lecture). Fluidité 4K50 non mesurée ; lecteur multicam séparé (GPU) conservé. |
