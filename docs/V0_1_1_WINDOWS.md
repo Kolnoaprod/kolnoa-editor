@@ -39,6 +39,12 @@ La PR [#43](https://github.com/Kolnoaprod/kolnoa-editor/pull/43) fournit la base
 - **Annulation.** La timeline et son historique sont publiés ensemble à la fin d'un montage réussi. L'annulation au milieu d'un montage ne laisse aucun clip partiel ni nouvelle action dans l'historique. L'export nettoie les fichiers partiels et préserve les segments de cache déjà valides. Après la publication du résultat, Ctrl+Z annule le montage en un geste.
 - **Validation.** Tests Qt avec 5, 10 et 119 vidéos courtes synthétiques décodées par FFmpeg, tests de l'annulation et du nettoyage des processus, tests de fenêtre et autotest de l'EXE sur le parcours import, montage, modification, réouverture, export 1080p avec son et aperçu.
 
+## Essai sur le corpus réel
+
+Sur Windows avec Qt hors écran et les 119 fichiers Sony lus depuis Google Drive, l'import a pris **1 min 08 s** et le montage **7 min 08 s**. Le traitement a atteint 100 % avec **350 clips sur la timeline et 8 groupes multicam**. Pendant le montage, un minuteur Qt réglé à 50 ms a reçu 6 825 événements, avec un maximum observé de 156 ms entre deux événements. La réouverture et l'annulation groupée ont réussi. Les tailles et dates de modification des 119 fichiers sont restées identiques. Ce scénario mesure le traitement et la réactivité de la boucle Qt. Le lecteur multicam a été neutralisé pendant la mesure.
+
+L'autotest de l'EXE portable réussit sans Python ni FFmpeg sur le PATH. Un essai hors écran de deux lancements de l'EXE a confirmé l'affichage signalé de la première fenêtre, puis le réveil de cette instance et la sortie du second processus avec le code 0. Lors de la première compilation locale, PyInstaller avait choisi une bibliothèque ICU incompatible à partir du PATH de l'hôte. L'autotest a détecté l'échec de chargement de Qt. Le build CI utilise un PATH Windows minimal pour laisser Qt charger l'ICU système.
+
 ## Limites
 
 L'heuristique de regroupement multicam reste celle de la V0.1. La lecture avec audio dans la timeline principale, la refonte de l'interface, le mode résident complet et le Companion ne font pas partie de ce chantier. Le comportement avec le GPU et les pilotes du poste de montage, la lecture temps réel 4K50 et les notifications système demandent des essais distincts.

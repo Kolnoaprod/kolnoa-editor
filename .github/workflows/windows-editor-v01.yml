@@ -42,15 +42,19 @@ jobs:
           python -m pip install -e .
           python -m pytest -q
       - name: PyInstaller
-        shell: cmd
-        run: >
-          python -m PyInstaller --noconfirm --onedir --windowed --name KolnoaEditor --paths src
-          --add-binary "tools\winapp\ffmpeg_bin\ffmpeg.exe;bin" --add-binary "tools\winapp\ffmpeg_bin\ffprobe.exe;bin"
-          --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.Qt3DCore tools\winapp\kolnoa_editor_app.py
+        shell: pwsh
+        run: |
+          $python = (Get-Command python).Source
+          # Le Qt des wheels utilise l'ICU de Windows. Ne pas collecter celle de Git/MSYS depuis le PATH.
+          $env:PATH = "$env:WINDIR\System32;$env:WINDIR"
+          & $python -m PyInstaller --noconfirm --onedir --windowed --name KolnoaEditor --paths src `
+            --add-binary "tools\winapp\ffmpeg_bin\ffmpeg.exe;bin" --add-binary "tools\winapp\ffmpeg_bin\ffprobe.exe;bin" `
+            --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.Qt3DCore tools\winapp\kolnoa_editor_app.py
       - name: Autotest de l'EXE (import, montage, consigne, enregistrement, réouverture, export 1080p, aperçu)
         shell: pwsh
         run: |
           $env:KOLNOA_ENGINE_DIR = Join-Path $PWD "exe-autotest"
+          $env:PATH = "$env:WINDIR\System32;$env:WINDIR"
           $p = Start-Process dist/KolnoaEditor/KolnoaEditor.exe -WindowStyle Hidden -ArgumentList "--selftest" -PassThru -Wait
           Get-Content (Join-Path $env:KOLNOA_ENGINE_DIR startup.log)
           "code de sortie : $($p.ExitCode)"
