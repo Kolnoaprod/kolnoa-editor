@@ -25,9 +25,9 @@ from . import layout as L
 from .peaks import PeakPyramid
 from .shortcuts import Shortcuts
 
-BG, RULER_BG, GRID = QColor("#0e1014"), QColor("#171a20"), QColor("#1f242d")
-CLIP_COLORS = {"video": QColor("#4672b5"), "audio": QColor("#3e8a68")}
-SELECTED, PLAYHEAD, GHOST = QColor("#e8a33d"), QColor("#ff6a4d"), QColor(255, 255, 255, 90)
+BG, RULER_BG, GRID = QColor("#151517"), QColor("#1b1b1e"), QColor("#232327")
+CLIP_COLORS = {"video": QColor("#4f6f9a"), "audio": QColor("#4a8466")}
+SELECTED, PLAYHEAD, GHOST = QColor("#e3b06d"), QColor("#e3b06d"), QColor(255, 255, 255, 90)
 SNAP_PX = 8
 
 

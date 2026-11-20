@@ -47,7 +47,8 @@ jobs:
           $python = (Get-Command python).Source
           # Le Qt des wheels utilise l'ICU de Windows. Ne pas collecter celle de Git/MSYS depuis le PATH.
           $env:PATH = "$env:WINDIR\System32;$env:WINDIR"
-          & $python -m PyInstaller --noconfirm --onedir --windowed --name KolnoaEditor --paths src `
+          & $python -m PyInstaller --noconfirm --onedir --windowed --name KolnoaEditor --icon src\kolnoa_editor\assets\kolnoa.ico --paths src `
+            --add-data "src\kolnoa_editor\assets;kolnoa_editor\assets" `
             --add-binary "tools\winapp\ffmpeg_bin\ffmpeg.exe;bin" --add-binary "tools\winapp\ffmpeg_bin\ffprobe.exe;bin" `
             --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.Qt3DCore tools\winapp\kolnoa_editor_app.py
       - name: Autotest de l'EXE (import, montage, consigne, enregistrement, réouverture, export 1080p, aperçu)

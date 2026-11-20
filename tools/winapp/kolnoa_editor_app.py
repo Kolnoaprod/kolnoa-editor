@@ -128,6 +128,9 @@ def main(argv: list[str]) -> int:
     app = QApplication.instance() or QApplication(argv)
     from kolnoa_editor.ui.theme import apply_theme
     apply_theme(app)                                          # thème avant toute boîte de dialogue
+    from PySide6.QtGui import QIcon
+    from kolnoa_editor.ui.assets import asset
+    app.setWindowIcon(QIcon(str(asset("kolnoa.ico"))))
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Kolnoa Editor")
     app.setApplicationVersion(__version__)
