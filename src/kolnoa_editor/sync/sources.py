@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from ..ffmpeg import CancelToken, ffmpeg_bin, run
-from ..probe import probe
+from ..probe import probe_cached
 from .correlate import detrend, energy_envelope
 
 
@@ -46,10 +46,11 @@ class FileSource:
         self.rate = rate
         self.cancel = cancel
         self.tmp_dir = Path(tmp_dir) if tmp_dir else None
-        info = probe(self.path)
+        info = probe_cached(self.path, cancel=cancel)
         if not info.has_audio:
             raise ValueError(f"{self.path.name}: aucune piste audio")
         self.duration = info.duration
+        self._envelopes: dict[int, np.ndarray] = {}
 
     def _decode(self, t0: float, dur: float | None, out: Path) -> None:
         cmd = [ffmpeg_bin(), "-y", "-hide_banner", "-v", "error"]
@@ -59,7 +60,7 @@ class FileSource:
         if dur is not None:
             cmd += ["-t", f"{dur:.6f}"]
         cmd += ["-vn", "-ac", "1", "-ar", str(self.rate), "-f", "f32le", str(out)]
-        run(cmd, cancel=self.cancel)
+        run(cmd, cancel=self.cancel, timeout=max(120, 2 * (dur or self.duration)))
 
     def _tmp(self) -> Path:
         fd, name = tempfile.mkstemp(suffix=".f32", dir=self.tmp_dir)
@@ -86,6 +87,10 @@ class FileSource:
         return out
 
     def envelope(self, env_rate: int = 100) -> np.ndarray:
+        if self.cancel is not None:
+            self.cancel.raise_if_cancelled()
+        if env_rate in self._envelopes:
+            return self._envelopes[env_rate]
         tmp = self._tmp()
         try:
             self._decode(0.0, None, tmp)
@@ -94,6 +99,9 @@ class FileSource:
             step = block * env_rate * 60               # blocs d'environ une minute, alignés sur l'enveloppe
             parts = []
             for i in range(0, len(data), step):
+                if self.cancel is not None and self.cancel.is_set():
+                    del data
+                    self.cancel.raise_if_cancelled()
                 x = np.asarray(data[i: i + step], dtype=np.float64)
                 n = (len(x) // block) * block
                 if n == 0:
@@ -103,4 +111,6 @@ class FileSource:
             del data
         finally:
             tmp.unlink(missing_ok=True)
-        return detrend(np.concatenate(parts), 2 * env_rate) if parts else np.zeros(0)
+        envelope = detrend(np.concatenate(parts), 2 * env_rate) if parts else np.zeros(0)
+        self._envelopes[env_rate] = envelope
+        return envelope

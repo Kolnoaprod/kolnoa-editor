@@ -17,6 +17,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..ffmpeg import CancelToken, ffmpeg_bin, ffprobe_bin, run, run_hidden
 from .audio_edit import master_at
 from .model import AudioStrip, Clip, Timeline, TimelineError
 
@@ -154,7 +155,7 @@ def _filter_script_args(path: str) -> list[str]:
     global _SCRIPT_OPT
     if _SCRIPT_OPT is None:
         try:
-            h = subprocess.run(["ffmpeg", "-hide_banner", "-h", "full"], capture_output=True, text=True, timeout=30).stdout
+            h = run_hidden([ffmpeg_bin(), "-hide_banner", "-h", "full"], capture_output=True, text=True, timeout=30).stdout
         except (OSError, subprocess.SubprocessError):
             h = ""
         _SCRIPT_OPT = "-filter_complex_script" if "filter_complex_script" in h else "-/filter_complex"
@@ -169,10 +170,10 @@ class AudioInfo:
     duration: float | None
 
 
-def probe_audio(path: Path) -> AudioInfo | None:
+def probe_audio(path: Path, *, cancel: CancelToken | None = None) -> AudioInfo | None:
     """Premier flux audio du média, ou None s'il n'en a pas (caméra muette)."""
-    out = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
-                         capture_output=True, text=True, check=True).stdout
+    out = run([ffprobe_bin(), "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
+              cancel=cancel, timeout=60).stdout
     d = json.loads(out)
     a = next((s for s in d["streams"] if s["codec_type"] == "audio"), None)
     if a is None:
@@ -260,10 +261,10 @@ class Loudness:
 _NUM = r"(-?\d+(?:\.\d+)?|-inf)"
 
 
-def measure_loudness(path: Path) -> Loudness:
+def measure_loudness(path: Path, *, cancel: CancelToken | None = None) -> Loudness:
     """Sonie intégrée (LUFS, EBU R128) et crête vraie (dBTP) mesurées par ffmpeg `ebur128` sur le fichier entier."""
-    r = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-af", "ebur128=peak=true", "-f", "null", "-"],
-                       capture_output=True, text=True)
+    r = run([ffmpeg_bin(), "-hide_banner", "-nostats", "-i", str(path), "-af", "ebur128=peak=true", "-f", "null", "-"],
+            cancel=cancel, check=False)
     tail = r.stderr[r.stderr.rfind("Summary:"):] if "Summary:" in r.stderr else ""
     def grab(label):
         m = re.search(label + rf"\s*{_NUM}", tail)
@@ -286,13 +287,13 @@ class MixReport:
     warnings: list[str] = field(default_factory=list)
 
 
-def _run(cmd: list[str]) -> None:
-    r = subprocess.run(cmd, capture_output=True, text=True)
+def _run(cmd: list[str], cancel=None) -> None:
+    r = run(cmd, cancel=cancel, check=False)
     if r.returncode != 0:
         raise TimelineError("ffmpeg a échoué : " + "\n".join(r.stderr.strip().splitlines()[-6:]))
 
 
-def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: float | None = None) -> MixReport:
+def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: float | None = None, cancel=None) -> MixReport:
     """Rend le mixage audio de la timeline dans `out_path` (WAV PCM 24 bits stéréo). Ne modifie aucun média.
 
     1. mixage en flottant ; 2. mesure (sonie, crête vraie) ; 3. si `audio_settings.target_lufs` : gain constant vers la cible ;
@@ -306,7 +307,7 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
         f = media_root / m
         if not f.is_file():
             raise TimelineError(f"média introuvable : {f}")
-        info = probe_audio(f)
+        info = probe_audio(f, cancel=cancel)
         if info is None:
             warnings.append(f"{m} n'a pas de piste audio : ignoré")
         else:
@@ -322,12 +323,12 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
         tmp = Path(tmp)
         script, dry = tmp / "graph.txt", tmp / "dry.wav"
         script.write_text(graph, encoding="utf-8")
-        cmd = ["ffmpeg", "-y", "-v", "error"]
+        cmd = [ffmpeg_bin(), "-y", "-v", "error"]
         for m in media:
             cmd += ["-i", str(media_root / m)]
         graph_cmd = [*_filter_script_args(str(script)), "-map", "[out]"]
-        _run(cmd + graph_cmd + ["-t", f"{total:.6f}", "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(dry)])
-        before = measure_loudness(dry)
+        _run(cmd + graph_cmd + ["-t", f"{total:.6f}", "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(dry)], cancel)
+        before = measure_loudness(dry, cancel=cancel)
         st = tl.audio_settings
         gain = 0.0
         if st.target_lufs is not None:
@@ -348,11 +349,11 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
                       f"alimiter=limit={_db_to_lin(st.ceiling_dbtp):.6f}:attack={LIMITER_ATTACK_MS}:release=50:level=disabled",
                       f"atrim=start_sample={lookahead}", "asetpts=N/SR/TB"]
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        fin = ["ffmpeg", "-y", "-v", "error", "-i", str(dry)]
+        fin = [ffmpeg_bin(), "-y", "-v", "error", "-i", str(dry)]
         if chain:
             fin += ["-af", ",".join(chain)]
-        _run(fin + ["-ar", str(plan.sample_rate), "-c:a", "pcm_s24le", str(out_path)])
-    after = measure_loudness(out_path)
+        _run(fin + ["-ar", str(plan.sample_rate), "-c:a", "pcm_s24le", str(out_path)], cancel)
+    after = measure_loudness(out_path, cancel=cancel)
     if after.true_peak_dbtp is not None and after.true_peak_dbtp > st.ceiling_dbtp + 0.1:
         warnings.append(f"crête vraie {after.true_peak_dbtp:.1f} dBTP au-dessus du plafond {st.ceiling_dbtp:.1f} dBTP : "
                         "baisser les gains ou le plafond du limiteur")

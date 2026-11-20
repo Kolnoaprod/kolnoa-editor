@@ -18,11 +18,12 @@ import csv
 import hashlib
 import json
 import re
-import subprocess
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from ..ffmpeg import run_hidden
 
 import numpy as np
 from zoneinfo import ZoneInfo
@@ -143,7 +144,7 @@ def _fraction(s: str | None) -> float | None:
 
 
 def ffprobe_json(path: Path) -> dict:
-    out = subprocess.run(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
+    out = run_hidden(["ffprobe", "-v", "error", "-print_format", "json", "-show_format", "-show_streams", str(path)],
                          capture_output=True, text=True, timeout=120)
     if out.returncode != 0:
         raise RuntimeError(out.stderr.strip()[:200] or "ffprobe a échoué")
@@ -155,7 +156,7 @@ def audio_is_empty(path: Path, duration: float | None, peak: float = 1e-5, probe
     dur = duration or 0.0
     peaks = []
     for t in np.linspace(0.0, max(dur - 2.0, 0.0), probes):
-        r = subprocess.run([ffmpeg_bin(), "-v", "error", "-ss", f"{t:.3f}", "-t", "2", "-i", str(path), "-vn", "-ac", "1",
+        r = run_hidden([ffmpeg_bin(), "-v", "error", "-ss", f"{t:.3f}", "-t", "2", "-i", str(path), "-vn", "-ac", "1",
                             "-ar", "8000", "-f", "f32le", "-"], capture_output=True, timeout=120)
         x = np.frombuffer(r.stdout, dtype="<f4")
         peaks.append(float(np.max(np.abs(x))) if len(x) else 0.0)

@@ -8,18 +8,20 @@ Lecteur multicam intégré : lot suivant (le composant existe : `MulticamView`).
 
 from __future__ import annotations
 
-import threading
 import time
+from copy import copy
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox,
+from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
 from ..auto.playhead import selection_from_playhead
+from ..ffmpeg import Cancelled
 from ..timeline import Selection, TimelineError
+from .operation import OperationDialog, OperationWorker
 from .peak_service import PeakService
 from .preview import frame_request, grab_frame
 from .timeline_view import TimelineView
@@ -35,6 +37,13 @@ class AppWindow(QMainWindow):
         self.ctl = controller
         self.exporter = exporter                 # (controller, chemin) -> rapport ; injectable (tests, lot J1-b)
         self.analyzer = analyzer
+        self._operation = None
+        self._preview_worker = None
+        self._preview_request = None
+        self._task_button = QPushButton("Suivi de la tâche")
+        self._task_button.clicked.connect(self._show_operation)
+        self.statusBar().addPermanentWidget(self._task_button)
+        self._task_button.hide()
         self.setWindowTitle("Kolnoa Editor")
         self.resize(1500, 900)
         self.peaks = PeakService(cache_dir=self.ctl.project.data / "peaks")
@@ -62,7 +71,7 @@ class AppWindow(QMainWindow):
         self._grab_timer = QTimer(self)
         self._grab_timer.setSingleShot(True)
         self._grab_timer.setInterval(60)
-        self._grab_timer.timeout.connect(self._update_preview)
+        self._grab_timer.timeout.connect(self._request_preview)
         self.zone = QLabel("Zone : aucune  ·  I / O pour poser l'entrée / la sortie")
         self.mark_in = self.mark_out = None
         self._build_ui()
@@ -209,13 +218,42 @@ class AppWindow(QMainWindow):
         if not self._grab_timer.isActive():
             self._grab_timer.start()
 
+    def _request_preview(self) -> None:
+        if self._operation is not None and self._operation.running:
+            return
+        request = frame_request(self.ctl.tl, self.tlv.playhead)
+        self._preview_request = request
+        if request is None:
+            self._show_preview(None, black=True)
+            return
+        if self._preview_worker is not None:
+            return
+        worker = OperationWorker(lambda cancel, _: grab_frame(self.ctl.project.root, *request, cancel=cancel), self)
+        self._preview_worker = worker
+        worker.finished.connect(self._preview_finished)
+        worker.request = request
+        worker.start()
+
+    def _preview_finished(self):
+        worker = self._preview_worker
+        self._preview_worker = None
+        worker.deleteLater()
+        if self._operation is not None and self._operation.running:
+            return
+        if self._preview_request is not None and (worker.request == self._preview_request or (self._playing and worker.result)):
+            self._show_preview(worker.result)
+        if worker.request != self._preview_request and self._preview_request is not None:
+            self._request_preview()
+
     def _update_preview(self) -> None:
         req = frame_request(self.ctl.tl, self.tlv.playhead)
-        if req is None:
-            self.preview.setPixmap(QPixmap())
+        png = grab_frame(self.ctl.project.root, *req) if req else None
+        self._show_preview(png, black=req is None)
+
+    def _show_preview(self, png, *, black=False):
+        if black:
             self.preview.setText("Noir (aucun plan à cette image)")
             return
-        png = grab_frame(self.ctl.project.root, req[0], req[1])
         pm = QPixmap()
         if png and pm.loadFromData(png):
             self.preview.setPixmap(pm.scaled(self.preview.width(), self.preview.height(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
@@ -321,21 +359,78 @@ class AppWindow(QMainWindow):
         return selection_from_playhead(tl, self.tlv.playhead)
 
     # --- actions ------------------------------------------------------------------------------------------
+    def _show_operation(self):
+        if self._operation is not None:
+            self._operation.showNormal()
+            self._operation.raise_()
+            self._operation.activateWindow()
+
+    def _start_operation(self, title, work, apply):
+        if self._operation is not None:
+            if self._operation.running:
+                self._show_operation()
+                return False
+            self._operation.close()
+            self._operation.deleteLater()
+        self.pause()
+        self._grab_timer.stop()
+        if self._preview_worker is not None:
+            self._preview_worker.cancel.cancel()
+        worker = OperationWorker(work, self)
+        dialog = OperationDialog(title, worker, self)
+        self._operation = dialog
+        self._task_button.setText("Suivi de la tâche")
+        self._task_button.show()
+        self.centralWidget().setEnabled(False)
+        self.menuBar().setEnabled(False)
+        dialog.show()
+
+        def finished():
+            try:
+                if worker.error is not None:
+                    raise worker.error
+                message = apply(worker.result)
+                success = True
+            except Cancelled:
+                message, success = "Opération annulée.", False
+            except Exception as error:
+                message, success = f"Impossible : {error}", False
+            self.centralWidget().setEnabled(True)
+            self.menuBar().setEnabled(True)
+            dialog.finish(message, success)
+            self._task_button.setText("Journal de la tâche")
+            self.say(message)
+            worker.deleteLater()
+
+        worker.finished.connect(finished)
+        worker.start()
+        return True
+
     def import_rushes(self, folder: str | None = None) -> None:
-        try:
-            n = self.ctl.import_rushes(folder)
-        except Exception as e:                              # noqa: BLE001 — message clair à l'utilisateur
-            self.say(f"Import impossible : {e}")
-            return
-        self.refresh()
-        self.say(f"{n} rush(es) vidéo importé(s) — rien n'a été modifié dans vos fichiers.")
+        def work(cancel, progress):
+            draft = copy(self.ctl)
+            draft.rushes = self.ctl.rushes.copy()
+            with self.ctl.session.staged(cancel.raise_if_cancelled) as draft.session:
+                count = draft.import_rushes(folder, cancel=cancel, on_progress=progress)
+            return draft, count
+
+        def apply(result):
+            draft, count = result
+            self.ctl.session.adopt(draft.session)
+            self.ctl.rushes = draft.rushes
+            self.refresh()
+            return f"{count} rush(es) vidéo importé(s)."
+
+        self._start_operation("Importation des rushes", work, apply)
 
     def selected_sequence(self) -> str | None:
         it = self.rushes.currentItem()
         return it.data(Qt.UserRole) if it else None
 
     def run_prompt(self, text: str) -> bool:
-        """Exécute une demande ; renvoie True si elle a été appliquée. Toute erreur est affichée, jamais silencieuse."""
+        """Renvoie True si la demande est acceptée. Le montage se termine en arrière-plan."""
+        if self._operation is not None and self._operation.running:
+            return False
         text = text.strip()
         if not text:
             return False
@@ -343,11 +438,24 @@ class AppWindow(QMainWindow):
             from ..auto.directives import parse_directive
             d = parse_directive(text)
             if d.kind == "build":
-                rep = self.ctl.build_with_multicam(text, self.selected_sequence(), analyzer=self.analyzer, source_factory=self.sync_source_factory)
-                g = rep["groups"]
-                skipped = [f"{x['name']}: {', '.join(x['skipped'])}" for x in g if x["skipped"]]
-                self.say(f"Montage posé : {len(g)} groupe(s) multicam, {rep['plain']} plan(s) à plat. Ctrl+Z annule toute la génération."
-                         + (f" ⚠ angle(s) non synchronisé(s), écarté(s) : {'; '.join(skipped)}" if skipped else ""))
+                section = self.selected_sequence()
+
+                def work(cancel, progress):
+                    return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
+                                                      analyzer=self.analyzer, source_factory=self.sync_source_factory)
+
+                def apply(result):
+                    draft, rep = result
+                    self.ctl.session.adopt(draft.session)
+                    self.ctl.rushes = draft.rushes
+                    groups = rep["groups"]
+                    skipped = [f"{g['name']}: {', '.join(g['skipped'])}" for g in groups if g["skipped"]]
+                    self.prompt.clear()
+                    self.refresh()
+                    return (f"Montage posé : {len(groups)} groupe(s) multicam, {rep['plain']} plan(s) à plat. Ctrl+Z annule la génération."
+                            + (" Angles écartés : " + " · ".join(skipped) if skipped else ""))
+
+                return self._start_operation("Montage automatique", work, apply)
             else:
                 sel = self.current_selection()
                 r = self.ctl.command(text, sel, analyzer=self.analyzer)
@@ -391,15 +499,36 @@ class AppWindow(QMainWindow):
         path = path or QFileDialog.getSaveFileName(self, "Exporter en MP4", str(self.ctl.project.renders_dir / "film.mp4"), "MP4 (*.mp4)")[0]
         if not path:
             return
-        try:
-            rep = (self.exporter or (lambda c, p, r: c.export(p, resolution=r)))(self.ctl, Path(path), resolution)
-            warn = getattr(rep, "warnings", None) or []
-            self.say(f"Exporté : {path}" + (f" — {len(warn)} avertissement(s) : {warn[0]}" if warn else ""))
-        except Exception as e:                              # noqa: BLE001
-            self.say(f"Export impossible : {e}")
-            QMessageBox.warning(self, "Export", str(e))
+        def work(cancel, progress):
+            progress("Vérification de la timeline", None, None, None, "Vérification des médias avant export")
+            if self.exporter:
+                return self.exporter(self.ctl, Path(path), resolution)
+
+            def render_progress(i, total, media):
+                if i == total and media == "assemblage":
+                    progress("Mixage et assemblage", str(path), total, total + 1, "Assemblage du MP4")
+                else:
+                    progress("Encodage vidéo", media, i - 1, total + 1, f"Segment {i}/{total} — {media}")
+
+            return self.ctl.export(path, resolution=resolution, on_progress=render_progress, cancel=cancel)
+
+        def apply(report):
+            warnings = getattr(report, "warnings", None) or []
+            if warnings:
+                self._operation.log.appendPlainText("\n".join(warnings))
+            return f"Exporté : {path}" + (f" — {len(warnings)} avertissement(s)" if warnings else "")
+
+        self._start_operation("Export MP4", work, apply)
 
     def closeEvent(self, e) -> None:
+        if self._operation is not None and self._operation.running:
+            self._show_operation()
+            self._operation.cancel_or_close()
+            e.ignore()
+            return
+        if self._preview_worker is not None:
+            self._preview_worker.cancel.cancel()
+            self._preview_worker.wait()
         self.peaks.close()
         super().closeEvent(e)
 
@@ -409,13 +538,13 @@ def default_player_factory(ctl: ProjectController, gid: str):
     from ..player.controller import MulticamPlayer
     from ..player.qt_backend import configure_hw
     from ..player.scheduler import MediaInfo
-    from ..probe import probe
+    from ..probe import probe_cached
     from .multicam_view import MulticamView
     configure_hw()
     media = {}
     for a in ctl.tl.group(gid).angles:
         src = ctl.project.root / a.media
-        i = probe(src)
+        i = probe_cached(src)
         proxy = ctl.project.proxy_path(a.media)
         media[a.id] = MediaInfo(str(src), i.width or 1920, i.height or 1080, i.fps or 25.0, str(proxy) if proxy.is_file() else None, 540, i.duration)
     return MulticamView(lambda mk: MulticamPlayer(ctl.tl, gid, "V1", media, mk, budget=6e8, hw_decode=True))

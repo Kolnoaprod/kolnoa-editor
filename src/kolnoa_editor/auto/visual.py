@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
-from ..ffmpeg import ffmpeg_bin
+from ..ffmpeg import CancelToken, ffmpeg_bin, run
 
 
 @dataclass(frozen=True)
@@ -88,7 +87,7 @@ def _rss_mb() -> float | None:
 
 
 def analyze_angle(path: Path, t_from: float, t_to: float, p: VisualParams, cache_dir: Path | None = None,
-                  stats: AnalysisStats | None = None) -> list[Sample]:
+                  stats: AnalysisStats | None = None, *, cancel: CancelToken | None = None) -> list[Sample]:
     """Échantillons de `path` entre `t_from` et `t_to` (secondes de l'angle), un par `slot_s`."""
     path = Path(path)
     if t_to - t_from < p.slot_s * 0.5:
@@ -110,13 +109,12 @@ def analyze_angle(path: Path, t_from: float, t_to: float, p: VisualParams, cache
     t0 = time.perf_counter()
     cmd = [ffmpeg_bin(), "-v", "error", "-ss", f"{t_from:.3f}", "-t", f"{t_to - t_from:.3f}", "-i", str(path), "-an", "-vf",
            f"fps=1/{p.slot_s},scale={p.width}:{p.height}", "-pix_fmt", "gray", "-f", "rawvideo", "-"]
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"analyse visuelle ffmpeg échouée pour {path}: {r.stderr.decode(errors='replace')[-1000:]}")
+    buf = run(cmd, cancel=cancel, binary=True, timeout=max(120, 5 * (t_to - t_from))).stdout
     n = p.width * p.height
-    buf = r.stdout
     out: list[Sample] = []
     for i in range(len(buf) // n):
+        if cancel is not None:
+            cancel.raise_if_cancelled()
         g = np.frombuffer(buf, dtype=np.uint8, count=n, offset=i * n).reshape(p.height, p.width)
         s, m, d, b = frame_metrics(g)
         out.append(Sample(round(t_from + (i + 0.5) * p.slot_s, 3), s, m, d, b, _faces(g) if p.faces else None))

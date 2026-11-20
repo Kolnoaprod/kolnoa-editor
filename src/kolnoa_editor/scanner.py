@@ -113,11 +113,18 @@ def compute_quick_hash(path: Path) -> str:
     return h.hexdigest()[:32]
 
 
-def scan(project: Project, subdir: str | None = None) -> list[SourceFile]:
+def scan(project: Project, subdir: str | None = None, *, cancel=None) -> list[SourceFile]:
     """Parcourt le disque (aucune lecture de contenu) et retourne les fichiers média trouvés."""
     base = project.root if subdir is None else project.root / subdir
     files: list[SourceFile] = []
-    for path in sorted(base.rglob("*")):
+    paths = []
+    for path in base.rglob("*"):
+        if cancel:
+            cancel.raise_if_cancelled()
+        paths.append(path)
+    for path in sorted(paths):
+        if cancel:
+            cancel.raise_if_cancelled()
         if not path.is_file() or project.is_in_data_dir(path) or ".kolnoa" in path.parts:
             continue
         ext = path.suffix.lower()
@@ -196,6 +203,7 @@ def refresh(
     probe_media: bool = False,
     with_hash: bool = False,
     prune: bool = False,
+    *, cancel=None, on_progress=None,
 ) -> tuple[list[SourceFile], RefreshReport]:
     """Met à jour la bibliothèque sans rien perdre.
 
@@ -204,7 +212,9 @@ def refresh(
     - fichier disparu : marqué `missing` (retiré seulement avec prune=True) ;
     - scan partiel (subdir) : les fichiers hors périmètre ne sont pas touchés.
     """
-    scanned = {f.rel: f for f in scan(project, subdir)}
+    if on_progress:
+        on_progress("Inventaire des fichiers", None, None, None, "Inventaire du dossier de rushes")
+    scanned = {f.rel: f for f in scan(project, subdir, cancel=cancel)}
     library = _load_tolerant(project)
     prefix = None if subdir is None else subdir.strip("/\\").replace("\\", "/") + "/"
 
@@ -241,19 +251,25 @@ def refresh(
             missing.append(rel)
 
     if probe_media or with_hash:
-        from .probe import probe  # import tardif : probe n'est pas nécessaire au simple scan
+        from .probe import probe_cached  # import tardif : probe n'est pas nécessaire au simple scan
 
-        for rel, f in library.items():
-            if f.missing or not in_scope(rel):
-                continue
+        targets = [f for f in library.values() if not f.missing and in_scope(f.rel)]
+        for completed, f in enumerate(targets):
+            if cancel:
+                cancel.raise_if_cancelled()
+            rel = f.rel
+            if on_progress:
+                on_progress("Lecture des métadonnées", rel, completed, len(targets) + 1, rel)
             path = project.resolve(rel)
             if with_hash and f.quick_hash is None:
                 f.quick_hash = compute_quick_hash(path)
             if probe_media and f.duration is None:
-                info = probe(path)
+                info = probe_cached(path, cancel=cancel)
                 f.duration, f.has_audio = info.duration, info.has_audio
 
     files = sorted(library.values(), key=lambda f: f.rel)
+    if cancel:
+        cancel.raise_if_cancelled()
     save_library(project, files)
     report = RefreshReport(added, changed, recovered, missing, removed, unchanged)
     log.info("refresh: %s", report.summary())

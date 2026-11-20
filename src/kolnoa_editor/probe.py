@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from .ffmpeg import ffprobe_bin, run
+from .ffmpeg import CancelToken, ffprobe_bin, run
 
 
 @dataclass
@@ -66,12 +66,12 @@ def _rotation(stream: dict) -> int:
     return 0
 
 
-def probe(path: Path | str) -> MediaInfo:
+def probe(path: Path | str, *, cancel: CancelToken | None = None) -> MediaInfo:
     out = run(
         [
             ffprobe_bin(), "-v", "error", "-print_format", "json",
             "-show_format", "-show_streams", str(path),
-        ]
+        ], cancel=cancel, timeout=60
     ).stdout
     data = json.loads(out)
     info = MediaInfo(duration=float(data.get("format", {}).get("duration") or 0.0))
@@ -97,11 +97,11 @@ def probe(path: Path | str) -> MediaInfo:
 _CACHE: dict[tuple[str, int, int], MediaInfo] = {}
 
 
-def probe_cached(path: Path | str) -> MediaInfo:
+def probe_cached(path: Path | str, *, cancel=None) -> MediaInfo:
     """probe() mémorisé tant que le fichier (taille + date) ne change pas."""
     p = Path(path)
     st = p.stat()
     key = (str(p), st.st_size, st.st_mtime_ns)
     if key not in _CACHE:
-        _CACHE[key] = probe(p)
+        _CACHE[key] = probe(p) if cancel is None else probe(p, cancel=cancel)
     return _CACHE[key]

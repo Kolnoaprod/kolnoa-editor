@@ -6,6 +6,9 @@ Il n'y a QU'UNE timeline et UNE Session : le monteur automatique, les consignes 
 
 from __future__ import annotations
 
+from collections import Counter
+from copy import copy, deepcopy
+from functools import partial
 from pathlib import Path
 from typing import Callable
 
@@ -13,19 +16,20 @@ from ..auto import (DirectiveResult, EditContext, RushInfo, StyleParams, analyze
                     parse_directive, plan_sequence, speech_moments)
 from ..auto.directives import DirectiveError
 from ..auto.visual import VisualParams
+from ..ffmpeg import CancelToken, Cancelled
 from ..project import Project
-from ..scanner import SourceFile, load_library, refresh, save_library
+from ..scanner import SourceFile, load_library, refresh
 from ..timeline import Scope, Selection, Session, Timeline
 from ..timeline.model import Track
 
 Analyzer = Callable[[RushInfo, Project], list]
 
 
-def default_analyzer(r: RushInfo, project: Project) -> list:
+def default_analyzer(r: RushInfo, project: Project, *, cancel=None) -> list:
     """Analyse locale par ffmpeg (parole/silence). Un rush sans piste son n'a pas de moment : le planificateur lui donne un plan d'ambiance."""
     if not r.has_audio:
         return []
-    return speech_moments(r.duration, analyze_silences(project.root / r.media, r.duration))
+    return speech_moments(r.duration, analyze_silences(project.root / r.media, r.duration, cancel=cancel))
 
 
 class ProjectController:
@@ -57,13 +61,18 @@ class ProjectController:
                 continue
             self.rushes.setdefault(f.rel, RushInfo(f.rel, f.duration, f.start, f.group, f.device, bool(f.has_audio)))
 
-    def import_rushes(self, subdir: str | None = None, probe_media: bool = True) -> int:
+    def import_rushes(self, subdir: str | None = None, probe_media: bool = True, *, cancel=None, on_progress=None) -> int:
         """Scanne le dossier (lecture seule), met à jour la bibliothèque, retourne le nombre de rushes vidéo utilisables."""
-        files, _ = refresh(self.project, subdir, probe_media=probe_media)
-        save_library(self.project, files)
+        files, _ = refresh(self.project, subdir, probe_media=probe_media, cancel=cancel, on_progress=on_progress)
         self._load_rushes(files)
         if not self.tl.clips and probe_media:
-            self.apply_format()                      # projet vide : il prend la cadence et la résolution de ses rushes
+            if on_progress:
+                on_progress("Détection du format du projet", None, None, None, "Cadence et résolution des rushes vidéo")
+            fmt = self.detect_format(cancel=cancel, on_progress=on_progress)
+            if fmt:
+                if cancel:
+                    cancel.raise_if_cancelled()
+                self.apply_format(fmt)                      # projet vide : il prend la cadence et la résolution de ses rushes
         return len(self.rushes)
 
     def add_rushes(self, infos: list[RushInfo]) -> None:
@@ -98,9 +107,22 @@ class ProjectController:
         return generate_first_edit(self.session, shots, label=prompt, durations={m: r.duration for m, r in self.rushes.items()},
                                    on_section=on_section)
 
+    def prepare_auto_edit(self, prompt, section, *, cancel, on_progress, **kwargs):
+        """Génère en arrière-plan. Le journal n'est publié qu'après la dernière vérification."""
+        draft = copy(self)
+        draft.rushes = deepcopy(self.rushes)
+
+        def commit():
+            cancel.raise_if_cancelled()
+            on_progress("Enregistrement du montage", None, None, None, "Montage calculé. Enregistrement en cours…")
+
+        with self.session.staged(commit) as draft.session:
+            report = draft.build_with_multicam(prompt, section, cancel=cancel, on_progress=on_progress, **kwargs)
+        return draft, report
+
     def build_with_multicam(self, prompt: str = "Monte-moi cette séquence", section: str | None = None, style: StyleParams | None = None,
                             analyzer: Analyzer | None = None, source_factory=None, sync_cfg=None, on_section=None,
-                            visual=None) -> dict:
+                            visual=None, *, cancel: CancelToken | None = None, on_progress=None) -> dict:
         """Comme `build`, mais les rushes qui se chevauchent dans le temps (plusieurs caméras) sont regroupés, synchronisés par l'audio puis montés
         en MULTICAM avec choix d'angle automatique ; les autres rushes sont montés à plat. Tout, dans l'ordre chronologique, en UN geste d'annulation.
         Renvoie un compte rendu (groupes, lignes de synchro, angles écartés)."""
@@ -109,10 +131,25 @@ class ProjectController:
         d = parse_directive(prompt)
         if d.kind != "build":
             raise DirectiveError("ce n'est pas une demande de montage")
-        self.analyze(analyzer, [section] if section else None)
+        token = cancel or CancelToken()
+        pool = [r for r in self.rushes.values() if section is None or r.group == section]
+        total = len(pool)
+        completed = 0
+
+        def progress(stage, media=None, message=None):
+            token.raise_if_cancelled()
+            if on_progress:
+                on_progress(stage, media, completed, 2 * total + 1, message)
+
+        analyze = analyzer or partial(default_analyzer, cancel=token)
+        for rush in pool:
+            progress(f"Analyse audio · {completed}/{total} rushes", rush.media, f"Analyse audio — {rush.media}")
+            if not rush.moments:
+                rush.moments = analyze(rush, self.project)
+            completed += 1
+        progress("Regroupement des rushes", message=f"{total} rush(es) parcouru(s). Recherche des chevauchements.")
         st = style or StyleParams(target_s=d.target_s)
         durs = {m: r.duration for m, r in self.rushes.items()}
-        pool = [r for r in self.rushes.values() if section is None or r.group == section]
         props = M.propose_groups(pool, only_section=section)
         covered = {r.media for p in props for r in p.members}
         report = {"groups": [], "plain": 0}
@@ -124,22 +161,46 @@ class ProjectController:
         if not blocks:
             raise DirectiveError("aucun rush à monter")
         pos0 = max([c.end for c in self.tl.clips_on("V1")], default=0)
-        with self.session.group(prompt, "auto", Scope(pos0, 10 ** 9)) as gid:
+        def placing(media):
+            progress(f"Construction de la timeline · {completed - total}/{total} rushes", media)
+
+        def place_plain(shots, rushes):
+            nonlocal completed
+            pending = Counter(shot.media for shot in shots)
+            completed += len(rushes) - len(pending)
+
+            def placed(media):
+                nonlocal completed
+                pending[media] -= 1
+                if not pending[media]:
+                    completed += 1
+
+            if shots:
+                generate_first_edit(self.session, shots, label=prompt, durations=durs, on_section=on_section,
+                                    on_file=placing, on_file_done=placed)
+
+        with self.session.group(prompt, "auto", Scope(pos0, 10 ** 9)):
             i = 0
             while i < len(blocks):
+                token.raise_if_cancelled()
                 kind, _, obj = blocks[i]
                 if kind == "plain":
                     run = [obj]
                     while i + 1 < len(blocks) and blocks[i + 1][0] == "plain":
                         i += 1
                         run.append(blocks[i][2])
+                    progress("Sélection des plans", run[0].media, f"Sélection dans {len(run)} rush(es)")
                     shots = plan_sequence(run, st)
-                    if shots:
-                        generate_first_edit(self.session, shots, label=prompt, durations=durs, on_section=on_section)
-                        report["plain"] += len(shots)
+                    place_plain(shots, run)
+                    report["plain"] += len(shots)
                 else:
                     g = M.create_group(self.session, obj, durs)
-                    lines = M.sync_group(self.session, g, self.project.root, sync_cfg, source_factory=source_factory or FileSource)
+                    progress("Synchronisation des caméras", obj.master, f"Synchronisation — {obj.name}")
+                    lines = M.sync_group(self.session, g, self.project.root, sync_cfg,
+                                         source_factory=source_factory or partial(FileSource, cancel=token),
+                                         cancel=token, on_file=lambda media: progress("Synchronisation des caméras", media))
+                    for line in lines:
+                        progress("Synchronisation des caméras", message=line)
                     grp = self.tl.group(g)
                     skipped = [a.id for a in grp.angles if not a.usable]
                     moms = M.master_moments(self.rushes[obj.master], self.tl, g)
@@ -150,18 +211,26 @@ class ProjectController:
                         samples = None
                         if vp.enabled:
                             samples, stats = M.analyze_group(self.session, g, self.project.root, g0, g1, durs, vp,
-                                                            self.project.data / "analysis", self._fresh_proxy)
+                                                            self.project.data / "analysis", self._fresh_proxy,
+                                                            cancel=token,
+                                                            on_file=lambda media: progress("Analyse vidéo", media, f"Analyse vidéo — {media}"))
+                            for note in stats.notes:
+                                progress("Analyse vidéo", message=note)
+                        progress("Sélection des angles", obj.master)
                         picks = M.choose_angles(self.tl, g, g0, g1, durs, st, moms, samples, vp)
                         if picks:
-                            M.generate_multicam_edit(self.session, g, picks, label=prompt)
+                            M.generate_multicam_edit(self.session, g, picks, label=prompt,
+                                                     on_file=placing)
                     report["groups"].append({"group": g, "name": obj.name, "angles": len(grp.angles), "skipped": skipped,
                                              "sync": lines, "shots": len(picks) if moms else 0,
                                              "analysis": None if stats is None else {"angles": stats.angles, "frames": stats.frames,
                                                                                     "seconds": round(stats.seconds, 2), "cache_hits": stats.cache_hits,
                                                                                     "peak_rss_mb": stats.peak_rss_mb, "notes": stats.notes}})
+                    completed += len(obj.members)
                     if on_section:
                         on_section(obj.name, 0, 0)
                 i += 1
+        progress("Finalisation", message=f"{total} rush(es) assemblé(s) ou évalué(s).")
         return report
 
     def _fresh_proxy(self, media: str):
@@ -207,15 +276,20 @@ class ProjectController:
     def _last_is_group(self) -> bool:
         return bool(self.session._undo and self.session._undo[-1].group)
 
-    def detect_format(self) -> dict:
+    def detect_format(self, *, cancel=None, on_progress=None) -> dict:
         """Format de travail déduit des rushes : cadence dominante (arrondie, p. ex. 50) et plus grande résolution (4K si un rush l'est).
         Les rushes de tailles différentes (4K50 et 1080p50) cohabitent : chacun est mis à l'échelle à l'export."""
-        from collections import Counter
         from ..probe import probe_cached
         fps, sizes = Counter(), []
-        for r in self.rushes.values():
+        for completed, r in enumerate(self.rushes.values()):
+            if cancel:
+                cancel.raise_if_cancelled()
+            if on_progress:
+                on_progress("Détection du format du projet", r.media, completed, len(self.rushes) + 1, None)
             try:
-                i = probe_cached(self.project.root / r.media)
+                i = probe_cached(self.project.root / r.media, cancel=cancel)
+            except Cancelled:
+                raise
             except Exception:                              # noqa: BLE001 — rush illisible : ignoré ici, signalé à l'export
                 continue
             if i.fps:

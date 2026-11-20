@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from ..ffmpeg import run_hidden
+
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
@@ -394,7 +396,7 @@ class PeakService(QObject):
     def _guess_total(self, path: str) -> int:
         """Nombre de crêtes attendu (pour la progression) : durée du conteneur si ffprobe répond, sinon l'estimation grossière 1 h."""
         try:
-            out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+            out = run_hidden(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
                                  capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL).stdout.strip()
             return max(1, int(float(out) / (BIN_SAMPLES / SAMPLE_RATE)))
         except (OSError, ValueError, subprocess.SubprocessError):
