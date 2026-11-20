@@ -36,13 +36,17 @@ def test_condensed_stages_an_edit_and_reports_portions(tmp_path, monkeypatch):
     monkeypatch.setattr("kolnoa_editor.app.controller.analyze_angle", lambda *a, **kw: [
         Sample(i + .5, 0 if i < 2 else 200, 128, 0, 0) for i in range(10)
     ])
+    events = []
     draft, report = ctl.prepare_auto_edit(
-        "Monte-moi cette séquence", None, cancel=CancelToken(), on_progress=lambda *args: None,
+        "Monte-moi cette séquence", None, cancel=CancelToken(), on_progress=lambda *args: events.append(args),
         media_scope=MediaScope(frozenset((a.media, b.media))), balanced=BalancedThresholds(), synchronize=False,
     )
     assert not ctl.tl.clips
     ctl.session.adopt(draft.session)
     assert {clip.media for clip in ctl.tl.clips_on("V1")} == {a.media, b.media}
     assert report["duration"] == 12 and report["used"] == 2
+    visual = [(done, total) for stage, _, done, total, _ in events if stage.startswith("Analyse des plages")]
+    assert visual == [(2, 7), (3, 7)]
+    assert [(done, total) for stage, _, done, total, _ in events if stage == "Finalisation"] == [(6, 7)]
     reopened = ProjectController.open(tmp_path, tmp_path / "project")
     assert reopened.tl.canonical() == ctl.tl.canonical()

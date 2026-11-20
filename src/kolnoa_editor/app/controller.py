@@ -139,12 +139,13 @@ class ProjectController:
         if media_scope is not None:
             pool = [rush for rush in pool if media_scope.includes(rush)]
         total = len(pool)
-        completed = 0
+        completed = qualified = 0
+        work_units = total * (3 if balanced is not None else 2) + 1
 
         def progress(stage, media=None, message=None):
             token.raise_if_cancelled()
             if on_progress:
-                on_progress(stage, media, completed, 2 * total + 1, message)
+                on_progress(stage, media, completed, work_units, message)
 
         analyze = analyzer or partial(default_analyzer, cancel=token)
         for rush in pool:
@@ -167,7 +168,7 @@ class ProjectController:
             raise DirectiveError("aucun rush à monter")
         pos0 = max([c.end for c in self.tl.clips_on("V1")], default=0)
         def placing(media):
-            progress(f"Construction de la timeline · {completed - total}/{total} rushes", media)
+            progress(f"Construction de la timeline · {completed - total - qualified}/{total} rushes", media)
 
         def place_plain(shots, rushes):
             nonlocal completed
@@ -185,12 +186,13 @@ class ProjectController:
                                     on_file=placing, on_file_done=placed)
 
         def select_flat(rushes):
+            nonlocal completed, qualified
             if balanced is None:
                 return plan_sequence(rushes, st)
             shots = []
             params = visual or VisualParams()
             for rush in rushes:
-                progress("Analyse des plages", rush.media, f"Analyse qualitative — {rush.media}")
+                progress(f"Analyse des plages · {qualified}/{total} rushes", rush.media, f"Analyse qualitative — {rush.media}")
                 src = self._fresh_proxy(rush.media) or self.project.root / rush.media
                 try:
                     samples = analyze_angle(src, 0, rush.duration, params, self.project.data / "analysis", cancel=token)
@@ -198,11 +200,13 @@ class ProjectController:
                     raise
                 except (OSError, FFmpegError) as error:
                     report["decisions"].append(f"{rush.media} : analyse impossible ({error})")
-                    continue
-                chosen, notes = select_portions(rush, samples, params.slot_s, st, balanced)
-                report["decisions"].extend(f"{rush.media} · {note}" for note in notes)
-                report["decisions"].append(f"{rush.media} · {len(chosen)} plage(s) retenue(s)")
-                shots.extend(chosen)
+                else:
+                    chosen, notes = select_portions(rush, samples, params.slot_s, st, balanced)
+                    report["decisions"].extend(f"{rush.media} · {note}" for note in notes)
+                    report["decisions"].append(f"{rush.media} · {len(chosen)} plage(s) retenue(s)")
+                    shots.extend(chosen)
+                qualified += 1
+                completed += 1
             return shots
 
         with self.session.group(prompt, "auto", Scope(pos0, 10 ** 9)):
@@ -253,6 +257,8 @@ class ProjectController:
                                                                                     "seconds": round(stats.seconds, 2), "cache_hits": stats.cache_hits,
                                                                                     "peak_rss_mb": stats.peak_rss_mb, "notes": stats.notes}})
                     if balanced is not None:
+                        qualified += len(obj.members)
+                        completed += len(obj.members)
                         separate = [self.rushes[angle.media] for angle in grp.angles if not angle.usable]
                         if separate:
                             report["decisions"].extend(f"{rush.media} · synchronisation incertaine, conservé dans les rushes"
