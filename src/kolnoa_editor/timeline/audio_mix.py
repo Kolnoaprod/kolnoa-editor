@@ -14,7 +14,7 @@ import math
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..ffmpeg import CancelToken, ffmpeg_bin, ffprobe_bin, run, run_hidden
@@ -230,7 +230,8 @@ def _pan_expr(ev: MixEvent, channels: int) -> str:
     return f"pan=stereo|FL={'+'.join(fl_s) or '0*c0'}|FR={'+'.join(fr_s) or '0*c0'}"
 
 
-def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) -> tuple[list[str], str]:
+def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float, *,
+                      window_start: float | None = None, input_offsets=None) -> tuple[list[str], str]:
     """(liste des médias dans l'ordre des entrées ffmpeg, graphe filter_complex). Les événements sans audio sont ignorés."""
     sr = plan.sample_rate
     media = list(dict.fromkeys(e.media for e in plan.events if e.media in infos))
@@ -246,7 +247,8 @@ def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) 
         for j, e in enumerate(uses[m]):
             ch = infos[m].channels
             src_dur = e.duration * e.tempo
-            chain = [f"atrim=start={e.src_start:.6f}:duration={src_dur:.6f}", "asetpts=PTS-STARTPTS"]
+            input_start = max(0.0, e.src_start - (input_offsets or {}).get(m, 0.0))
+            chain = [f"atrim=start={input_start:.6f}:duration={src_dur:.6f}", "asetpts=PTS-STARTPTS"]
             if abs(e.tempo - 1.0) > 1e-9 and abs(e.tempo - 1.0) > 0.01:
                 chain.append(f'atempo={e.tempo:.8f}')
             elif abs(e.tempo - 1.0) > 1e-9:
@@ -263,7 +265,15 @@ def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) 
                 chain.append(f"afade=t=in:st=0:d={e.fade_in:.6f}:curve={CURVE[e.fade_in_curve]}")
             if e.fade_out > 0:
                 chain.append(f"afade=t=out:st={max(0.0, e.duration - e.fade_out):.6f}:d={e.fade_out:.6f}:curve={CURVE[e.fade_out_curve]}")
-            delay = max(0, round(e.t_start * sr))
+            delay_start = e.t_start
+            if window_start is not None:
+                left = max(window_start, e.t_start)
+                right = min(window_start + total, e.end)
+                trim_start = max(0, round(left * sr) - round(e.t_start * sr))
+                trim_end = round(right * sr) - round(e.t_start * sr)
+                chain += [f"atrim=start_sample={trim_start}:end_sample={trim_end}", "asetpts=N/SR/TB"]
+                delay_start -= window_start
+            delay = max(0, round(delay_start * sr))
             if delay:
                 chain.append(f"adelay=delays={delay}S:all=1")
             lab = f"e{k}_{j}"
@@ -323,6 +333,54 @@ def _run(cmd: list[str], cancel=None) -> None:
         raise TimelineError("ffmpeg a échoué : " + "\n".join(r.stderr.strip().splitlines()[-6:]))
 
 
+MIX_WINDOW_SECONDS = 60
+
+
+def _render_dry(plan, infos, total, media_root, directory, dry, cancel):
+    """Borne la taille du graphe audio en traitant de courts blocs au temps du programme."""
+    script = directory / "graph.txt"
+    inputs = [ffmpeg_bin(), "-y", "-v", "error"]
+
+    def render_block(piece, duration, path, start=None):
+        offsets = {}
+        if start is not None:
+            for event in piece.events:
+                offsets[event.media] = min(event.src_start, offsets.get(event.media, event.src_start))
+        media, graph = build_filtergraph(piece, infos, duration, window_start=start, input_offsets=offsets)
+        script.write_text(graph, encoding="utf-8")
+        cmd = list(inputs)
+        for name in media:
+            offset = offsets.get(name, 0.0)
+            if offset > 0:
+                cmd += ["-ss", f"{offset:.6f}"]
+            cmd += ["-i", str(media_root / name)]
+        cmd += [*_filter_script_args(str(script)), "-map", "[out]", "-t", f"{duration:.6f}",
+                "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(path)]
+        _run(cmd, cancel)
+
+    if total <= MIX_WINDOW_SECONDS:
+        render_block(plan, total, dry)
+        return
+
+    blocks = []
+    end_sample = round(total * plan.sample_rate)
+    step = MIX_WINDOW_SECONDS * plan.sample_rate
+    for index, sample in enumerate(range(0, end_sample, step)):
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+        start = sample / plan.sample_rate
+        end = min(sample + step, end_sample) / plan.sample_rate
+        events = [e for e in plan.events if round(e.end * plan.sample_rate) > sample
+                  and round(e.t_start * plan.sample_rate) < min(sample + step, end_sample)]
+        path = directory / f"block-{index:05}.wav"
+        render_block(replace(plan, events=events), end - start, path, start)
+        blocks.append(path)
+    playlist = directory / "blocks.txt"
+    playlist.write_text("".join("file '" + path.resolve().as_posix().replace("'", "'\\''") + "'\n" for path in blocks),
+                        encoding="utf-8")
+    _run([*inputs, "-f", "concat", "-safe", "0", "-i", str(playlist), "-c:a", "copy", "-rf64", "auto", str(dry)], cancel)
+
+
 def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: float | None = None, cancel=None) -> MixReport:
     """Rend le mixage audio de la timeline dans `out_path` (WAV PCM 24 bits stéréo). Ne modifie aucun média.
 
@@ -360,16 +418,10 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
     warnings.extend(note for note in plan.warnings if note not in warnings)
     plan.events = [e for e in plan.events if e.media in infos]
     total = duration if duration is not None else plan.duration
-    media, graph = build_filtergraph(plan, infos, total)
     with tempfile.TemporaryDirectory(prefix="kolnoa_mix_") as tmp:
         tmp = Path(tmp)
-        script, dry = tmp / "graph.txt", tmp / "dry.wav"
-        script.write_text(graph, encoding="utf-8")
-        cmd = [ffmpeg_bin(), "-y", "-v", "error"]
-        for m in media:
-            cmd += ["-i", str(media_root / m)]
-        graph_cmd = [*_filter_script_args(str(script)), "-map", "[out]"]
-        _run(cmd + graph_cmd + ["-t", f"{total:.6f}", "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(dry)], cancel)
+        dry = tmp / "dry.wav"
+        _render_dry(plan, infos, total, media_root, tmp, dry, cancel)
         before = measure_loudness(dry, cancel=cancel)
         st = tl.audio_settings
         gain = 0.0

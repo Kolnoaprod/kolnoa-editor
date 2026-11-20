@@ -331,3 +331,15 @@ def test_audio_falls_back_after_master_ends(tmp_path):
     assert np.max(np.abs(seg(out, 1.4, 2.5))) == pytest.approx(.25, abs=.02)
     assert np.max(np.abs(seg(out, 4.0, 5.0))) == pytest.approx(.45, abs=.02)
     assert any("son repris" in warning for warning in report.warnings)
+
+
+def test_windowed_mix_preserves_samples_at_boundaries(tmp_path, monkeypatch):
+    write_wav(tmp_path / "take.wav", tone(440, 10.0, .25))
+    write_wav(tmp_path / "back.wav", tone(820, 10.0, .15))
+    tl = tl_with(Clip("a1", "A1", "take.wav", 0, 150, .5, fade_in=2.5, fade_out=2.5),
+                 Clip("a2", "A1", "back.wav", 150, 50, 2.0))
+    reference, _ = render(tl, tmp_path, "reference.wav")
+    monkeypatch.setattr("kolnoa_editor.timeline.audio_mix.MIX_WINDOW_SECONDS", 2)
+    actual, _ = render(tl, tmp_path, "windowed.wav")
+    assert actual.shape == reference.shape
+    assert np.max(np.abs(actual - reference)) < .002
