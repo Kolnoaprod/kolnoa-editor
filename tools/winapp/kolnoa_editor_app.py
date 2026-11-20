@@ -69,7 +69,7 @@ def selftest() -> int:
     assert info.duration > 1 and info.width == 1920, f"export {info}"
     from PySide6.QtWidgets import QApplication
     from kolnoa_editor.ui.app_window import AppWindow
-    app = QApplication([])
+    app = QApplication.instance() or QApplication([])
     win = AppWindow(c2, player_factory=lambda ctl, g: None)
     win.show()
     win.tlv.set_playhead(25)
