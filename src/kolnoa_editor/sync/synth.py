@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from ..ffmpeg import ffmpeg_bin, run_hidden
+
 
 def speech_like(seconds: float, seed: int, rate: int = 8000) -> np.ndarray:
     """Bruit large bande haché en « syllabes » d'amplitudes variées, avec quelques claquements : ressemble à de
@@ -87,8 +89,6 @@ def luma_scene(seconds: float, fps: float, seed: int, events: list[float] | None
 
 def write_gray_video(path: Path, luma: np.ndarray, fps: float, size=(64, 36), with_audio: bool = False) -> Path:
     """Vidéo H.264 dont la luminosité suit `luma` (une image par échantillon), avec un motif fixe propre à la scène."""
-    import subprocess
-    from ..ffmpeg import ffmpeg_bin
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     w, h = size
@@ -100,14 +100,12 @@ def write_gray_video(path: Path, luma: np.ndarray, fps: float, size=(64, 36), wi
     if with_audio:
         cmd += ["-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono", "-shortest", "-c:a", "aac"]
     cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-g", "5", str(path)]
-    subprocess.run(cmd, input=frames.tobytes(), check=True)
+    run_hidden(cmd, input=frames.tobytes(), check=True)
     return path
 
 
 def mux_audio(video: Path, wav: Path, out: Path) -> Path:
     """Colle une piste audio (WAV) sur une vidéo : fabrique une « caméra » avec image et son."""
-    import subprocess
-    from ..ffmpeg import ffmpeg_bin
-    subprocess.run([ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", "-i", str(video), "-i", str(wav),
+    run_hidden([ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", "-i", str(video), "-i", str(wav),
                     "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", str(out)], check=True)
     return Path(out)

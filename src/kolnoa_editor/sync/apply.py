@@ -54,7 +54,7 @@ def plan_audio_sync(tl: Timeline, group_id: str, estimates: dict[str, SyncEstima
 
 def sync_group_audio(tl: Timeline, group_id: str, sources: dict, cfg: SyncConfig | None = None,
                      hints: dict[str, tuple[float, float]] | None = None,
-                     cancel: CancelToken | None = None) -> dict[str, SyncEstimate]:
+                     cancel: CancelToken | None = None, *, on_angle=None) -> dict[str, SyncEstimate]:
     """Estime tous les angles audio du groupe contre son maître. `sources` : angle_id -> source audio."""
     g = tl.group(group_id)
     ref = sources[g.master]
@@ -62,6 +62,8 @@ def sync_group_audio(tl: Timeline, group_id: str, sources: dict, cfg: SyncConfig
     for a in g.angles:
         if a.id == g.master or not a.has_audio or a.id not in sources:
             continue
+        if on_angle:
+            on_angle(a)
         out[a.id] = estimate_audio_sync(ref, sources[a.id], cfg, (hints or {}).get(a.id), cancel)
     return out
 

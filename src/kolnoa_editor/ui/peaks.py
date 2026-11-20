@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from ..ffmpeg import run_hidden
+
 import numpy as np
 
 BIN_S = 0.02                       # un pic par 20 ms au niveau 0
@@ -52,7 +54,7 @@ def load_peaks(media_path: str | Path, max_seconds: float = 4 * 3600) -> PeakPyr
     """Décode l'audio (mono 8 kHz) avec ffmpeg et construit la pyramide. None si le média n'a pas d'audio ou si ffmpeg échoue.
     N'écrit rien et ne modifie jamais le média. À appeler hors du fil de l'interface."""
     try:
-        raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(media_path), "-t", str(max_seconds), "-vn", "-ac", "1",
+        raw = run_hidden(["ffmpeg", "-v", "error", "-i", str(media_path), "-t", str(max_seconds), "-vn", "-ac", "1",
                               "-ar", "8000", "-f", "f32le", "-"], stdin=subprocess.DEVNULL, capture_output=True,
                              timeout=600).stdout
     except (OSError, subprocess.SubprocessError):

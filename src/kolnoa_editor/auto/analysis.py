@@ -5,9 +5,10 @@ L'analyse est séparée du reste : `RushInfo` est une donnée simple, donc le pl
 from __future__ import annotations
 
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from ..ffmpeg import CancelToken, ffmpeg_bin, run
 
 
 @dataclass(frozen=True)
@@ -37,11 +38,11 @@ _SIL = re.compile(r"silence_(start|end): (-?[\d.]+)")
 
 
 def analyze_silences(path: Path, duration: float, noise_db: float = -35.0, min_silence: float = 0.6,
-                     runner=subprocess.run) -> list[tuple[float, float]]:
+                     runner=None, *, cancel: CancelToken | None = None) -> list[tuple[float, float]]:
     """Plages SILENCIEUSES [(début, fin)] d'un fichier, par ffmpeg. `runner` injectable pour les tests."""
-    p = runner(["ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-vn", "-af",
-                f"silencedetect=noise={noise_db}dB:d={min_silence}", "-f", "null", "-"],
-               capture_output=True, text=True)
+    cmd = [ffmpeg_bin() if runner is None else "ffmpeg", "-hide_banner", "-nostats", "-i", str(path), "-vn", "-af",
+           f"silencedetect=noise={noise_db}dB:d={min_silence}", "-f", "null", "-"]
+    p = run(cmd, cancel=cancel, check=False, timeout=max(120, 2 * duration)) if runner is None else runner(cmd, capture_output=True, text=True)
     out, cur = [], None
     for kind, val in _SIL.findall(p.stderr or ""):
         v = max(0.0, float(val))

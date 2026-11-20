@@ -1,6 +1,7 @@
 """Fenêtre d'application (Qt hors écran) : le même workflow que les tests du contrôleur, piloté par la fenêtre."""
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -32,16 +33,30 @@ def win(app, tmp_path):
     w.close()
 
 
+def wait_operation(win, timeout=10):
+    end = time.monotonic() + timeout
+    while win._operation.running and time.monotonic() < end:
+        QApplication.processEvents()
+        time.sleep(0.005)
+    assert not win._operation.running
+    win._operation.close()
+
+
+def build(win):
+    assert win.run_prompt("Monte-moi cette séquence")
+    wait_operation(win)
+
+
 def test_rush_list_and_build_and_undo(win):
     assert win.rushes.count() == 3
-    assert win.run_prompt("Monte-moi cette séquence")
+    build(win)
     assert win.ctl.tl.clips_on("V1") and "Montage posé" in win.status.text()
     win.undo()
     assert not win.ctl.tl.clips
 
 
 def test_zone_in_out_drives_directive_and_marks(win):
-    win.run_prompt("Monte-moi cette séquence")
+    build(win)
     tl = win.ctl.tl
     fps = tl.fps
     before = {c.id: c.duration for c in tl.clips_on("V1")}
@@ -58,7 +73,7 @@ def test_zone_in_out_drives_directive_and_marks(win):
 
 
 def test_selection_by_clicks_and_errors_shown(win):
-    win.run_prompt("Monte-moi cette séquence")
+    build(win)
     win.tlv.set_playhead(max(c.end for c in win.ctl.tl.clips_on("V1")) + 10)
     assert not win.run_prompt("raccourcis de moitié")                 # tête hors plan : refus
     assert "aucun plan" in win.status.text().lower()
@@ -69,12 +84,13 @@ def test_selection_by_clicks_and_errors_shown(win):
 
 
 def test_save_reopen_and_export(win, tmp_path):
-    win.run_prompt("Monte-moi cette séquence")
+    build(win)
     win.save()
     before = win.ctl.tl.canonical()
     again = ProjectController.open(tmp_path / "m", tmp_path / "d")
     assert again.tl.canonical() == before
     win.export(str(tmp_path / "film.mp4"), "1080p")
+    wait_operation(win)
     assert win.exported == [(tmp_path / "film.mp4", "1080p")]
 
 
@@ -133,7 +149,7 @@ def test_explain_selection(win):
 
 
 def test_prompt_at_playhead_without_explicit_selection(win):
-    assert win.run_prompt("Monte-moi cette séquence")
+    build(win)
     before = {c.id: c.duration for c in win.ctl.tl.clips_on("V1")}
     first = win.ctl.tl.clips_on("V1")[0]
     win.tlv.set_playhead(first.start)
@@ -144,3 +160,106 @@ def test_prompt_at_playhead_without_explicit_selection(win):
     assert all(after[cid] == duration for cid, duration in before.items() if cid != first.id)
     win.undo()
     assert {c.id: c.duration for c in win.ctl.tl.clips_on("V1")} == before
+
+
+def test_cancel_during_generation_keeps_history_and_qt_responsive(win, tmp_path):
+    from threading import Event
+    from PySide6.QtCore import QTimer
+    from kolnoa_editor.auto import RushInfo
+
+    win.ctl.add_rushes([RushInfo("extra.mp4", 4)])
+    entered = Event()
+    release = Event()
+
+    def analyze(rush, project):
+        entered.set()
+        assert release.wait(5)
+        return []
+
+    win.analyzer = analyze
+    win.show()
+    journal = win.ctl.session.journal_path
+    before = journal.read_bytes()
+    timeline = win.ctl.tl.canonical()
+    assert win.run_prompt("Monte-moi cette séquence")
+    assert entered.wait(2)
+    dialog = win._operation
+    dialog.showMinimized()
+    QApplication.processEvents()
+    assert win._task_button.isVisible()
+    win._task_button.click()
+    assert not dialog.isMinimized()
+    assert not win.run_prompt("Monte-moi cette séquence")
+    QTimer.singleShot(0, dialog.cancel_btn.click)
+    QApplication.processEvents()
+    assert dialog.worker.cancel.is_set()
+    release.set()
+    wait_operation(win)
+    assert "annulée" in win.status.text()
+    assert journal.read_bytes() == before
+    assert win.ctl.tl.canonical() == timeline
+    assert ProjectController.open(tmp_path / "m", tmp_path / "d").tl.canonical() == timeline
+
+
+@pytest.mark.parametrize("count", [5, 10, 119])
+def test_auto_progress_on_real_ffmpeg_inputs(app, tmp_path, count):
+    import shutil
+
+    from kolnoa_editor.ffmpeg import ffmpeg_bin, run
+    from kolnoa_editor.auto import RushInfo
+
+    if not shutil.which("ffmpeg"):
+        pytest.skip("FFmpeg indisponible")
+    root = tmp_path / "medias"
+    root.mkdir()
+    first = root / "rush-000.mp4"
+    run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=96x64:rate=25:duration=2",
+         "-f", "lavfi", "-i", "sine=frequency=600:duration=2", "-c:v", "libx264", "-c:a", "aac", str(first)])
+    for i in range(1, count):
+        shutil.copyfile(first, root / f"rush-{i:03}.mp4")
+
+    ctl = ProjectController.open(root, tmp_path / "project")
+    # Sans heures communes, le cas isole le débit de traitement mono, sans corrélation multicam.
+    ctl.add_rushes([RushInfo(path.name, 2) for path in sorted(root.glob("*.mp4"))])
+    window = AppWindow(ctl)
+    window.show()
+    assert window.run_prompt("Monte-moi cette séquence")
+    events = []
+    window._operation.worker.progress.connect(lambda *args: events.append(args))
+    wait_operation(window, timeout=120)
+    assert window._operation.bar.value() == 100
+    assert "Montage posé" in window.status.text()
+    assert len(ctl.tl.clips_on("V1")) == count
+    assert {event[1] for event in events if event[0].startswith("Analyse audio")} == set(ctl.rushes)
+    work = [event[2] for event in events if event[2] is not None]
+    assert work == sorted(work) and work[-1] == 2 * count
+    ctl.undo()
+    assert not ctl.tl.clips
+    window.close()
+
+
+def test_instance_lock_and_activation(app, tmp_path):
+    from uuid import uuid4
+
+    from kolnoa_editor.app.instance import InstanceLock
+    from kolnoa_editor.ui.activation import ActivationServer, notify_running_instance
+
+    first = InstanceLock(tmp_path)
+    second = InstanceLock(tmp_path)
+    assert first.acquire()
+    try:
+        assert not second.acquire()
+        name = f"KolnoaTest-{uuid4().hex}"
+        server = ActivationServer(name)
+        observed = []
+        server.show_requested.connect(lambda: observed.append(True))
+        assert server.ok and notify_running_instance(name=name)
+        end = time.monotonic() + 2
+        while not observed and time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.005)
+        assert observed == [True]
+    finally:
+        first.release()
+    assert second.acquire()
+    second.release()

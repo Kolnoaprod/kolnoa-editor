@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from kolnoa_editor.auto.visual import AnalysisStats, VisualParams, analyze_angle
+from kolnoa_editor.ffmpeg import FFmpegError
 
 
 def test_same_filename_different_cameras_never_share_visual_cache(tmp_path, monkeypatch):
@@ -21,13 +22,14 @@ def test_same_filename_different_cameras_never_share_visual_cache(tmp_path, monk
     params = VisualParams(width=16, height=16)
     calls = []
 
-    def fake_run(cmd, capture_output):
+    def fake_run(cmd, *, binary, **kwargs):
+        assert binary
         source = Path(cmd[cmd.index("-i") + 1])
         calls.append(source)
         gray = 60 if source == a else 180
         return SimpleNamespace(returncode=0, stdout=np.full((16, 16), gray, dtype=np.uint8).tobytes(), stderr=b"")
 
-    monkeypatch.setattr("kolnoa_editor.auto.visual.subprocess.run", fake_run)
+    monkeypatch.setattr("kolnoa_editor.auto.visual.run", fake_run)
     stats = AnalysisStats()
     cache = tmp_path / "cache"
     first = analyze_angle(a, 0, 1, params, cache, stats)
@@ -44,11 +46,11 @@ def test_same_filename_different_cameras_never_share_visual_cache(tmp_path, monk
 def test_ffmpeg_error_is_not_cached_as_empty_analysis(tmp_path, monkeypatch):
     source = tmp_path / "bad.mp4"
     source.write_bytes(b"not a video")
-    monkeypatch.setattr(
-        "kolnoa_editor.auto.visual.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout=b"", stderr=b"Invalid data"),
-    )
+    def fake_run(*args, **kwargs):
+        raise FFmpegError("Invalid data")
+
+    monkeypatch.setattr("kolnoa_editor.auto.visual.run", fake_run)
     cache = tmp_path / "cache"
-    with pytest.raises(RuntimeError, match="Invalid data"):
+    with pytest.raises(FFmpegError, match="Invalid data"):
         analyze_angle(source, 0, 1, VisualParams(), cache)
     assert not cache.exists() or not list(cache.glob("*.json"))

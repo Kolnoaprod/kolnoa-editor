@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import json
 import statistics
-import subprocess
 import sys
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
+from kolnoa_editor.ffmpeg import run_hidden
 
 
 def pct(a, p):
@@ -33,7 +34,7 @@ def gen(folder: str, n: int = 3, seconds: int = 10, w: int = 3840, h: int = 2160
     Path(folder).mkdir(parents=True, exist_ok=True)
     for i in range(n):
         f = str(Path(folder) / f"synthetic_4k50_{i + 1}.mp4")
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+        run_hidden(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
                         f"testsrc2=size={w}x{h}:rate={fps}:duration={seconds}", "-f", "lavfi", "-i", f"sine=f={220 * (i + 1)}:duration={seconds}",
                         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", "-g", "25",
                         "-c:a", "aac", "-shortest", f], check=True)

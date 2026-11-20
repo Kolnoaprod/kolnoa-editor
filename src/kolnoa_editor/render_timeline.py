@@ -96,14 +96,16 @@ def _encode_span(tl: Timeline, span: VideoSpan, src: Path | None, kind: str, res
     run(cmd, cancel)
 
 
-def preflight_timeline(tl: Timeline, media_root: Path) -> tuple[Flattened, list]:
+def preflight_timeline(tl: Timeline, media_root: Path, *, cancel=None) -> tuple[Flattened, list]:
     fl = flatten_video(tl)
 
     def exists(m): return (media_root / m).is_file()
 
     def length(m):
         try:
-            return probe(media_root / m).duration
+            return probe(media_root / m, cancel=cancel).duration
+        except Cancelled:
+            raise
         except Exception:                                    # noqa: BLE001 — illisible : signalé par `exists`/rendu
             return None
 
@@ -125,7 +127,7 @@ def render_timeline(tl: Timeline, media_root: Path | str, out: Path | str, cache
         raise ValueError("kind doit être 'proxy' ou 'final'")
     res = resolve_resolution(tl, resolution)
     media_root, out, cache = Path(media_root), Path(out), Path(cache_dir)
-    fl, issues = preflight_timeline(tl, media_root)
+    fl, issues = preflight_timeline(tl, media_root, cancel=cancel)
     errors = [i for i in issues if i.level == "error"]
     if errors:
         raise TimelineRenderError("export impossible : " + " ; ".join(i.message for i in errors[:4]), issues)
@@ -144,7 +146,7 @@ def render_timeline(tl: Timeline, media_root: Path | str, out: Path | str, cache
             if cancel is not None:
                 cancel.raise_if_cancelled()
             if on_progress:
-                on_progress(i, len(fl.spans), sp.clip_id or "noir")
+                on_progress(i, len(fl.spans), sp.media or "noir")
             src = (media_root / sp.media) if sp.media else None
             target = seg_dir / f"{_span_key(sp, src, tl, kind, res)}.mkv"
             if target.is_file() and target.stat().st_size > 0:
@@ -162,13 +164,15 @@ def render_timeline(tl: Timeline, media_root: Path | str, out: Path | str, cache
             on_progress(len(fl.spans), len(fl.spans), "assemblage")
         seconds = fl.total / tl.fps
         concat.write_text("".join("file '" + p.resolve().as_posix().replace("'", "'\\''") + "'\n" for p in cached), encoding="utf-8")
-        mix = render_mix(tl, media_root, wav, duration=seconds)
+        mix = render_mix(tl, media_root, wav, duration=seconds, cancel=cancel)
         run([ffmpeg_bin(), "-y", "-hide_banner", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat), "-i", str(wav),
              "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", str(SAMPLE_RATE),
              "-t", f"{seconds:.6f}", "-movflags", "+faststart", str(part)], cancel)
-        actual = probe(part).duration
+        actual = probe(part, cancel=cancel).duration
         if abs(actual - seconds) > 0.15:
             raise TimelineRenderError(f"durée inattendue : {actual:.2f} s au lieu de {seconds:.2f} s")
+        if cancel:
+            cancel.raise_if_cancelled()
         os.replace(part, out)
         return RenderReport(out, actual, fl.total, len(fl.spans), encoded, reused, res,
                             [i.message for i in issues if i.level == "warning"] + list(mix.warnings))

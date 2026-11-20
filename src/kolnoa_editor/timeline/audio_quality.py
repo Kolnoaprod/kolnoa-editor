@@ -16,6 +16,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..ffmpeg import run_hidden
+
 import numpy as np
 
 from .audio_mix import measure_loudness
@@ -70,7 +72,7 @@ def measure_audio(path: Path, start: float = 0.0, duration: float | None = None)
         raise TimelineError(f"média introuvable : {path}")
     if duration is None or duration > MAX_ANALYSIS_S:
         duration = MAX_ANALYSIS_S
-    probe = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels,sample_rate",
+    probe = run_hidden(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels,sample_rate",
                             "-of", "csv=p=0", str(path)], capture_output=True, text=True)
     if probe.returncode != 0 or not probe.stdout.strip():
         raise TimelineError(f"{path.name} n'a pas de piste audio")
@@ -78,7 +80,7 @@ def measure_audio(path: Path, start: float = 0.0, duration: float | None = None)
     sr, ch = int(sr_s), int(ch_s)
     cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.6f}", "-t", f"{duration:.6f}", "-i", str(path), "-vn",
            "-ac", str(min(ch, 2)), "-ar", str(DECODE_SR), "-f", "f32le", "-"]
-    raw = subprocess.run(cmd, capture_output=True, check=True).stdout
+    raw = run_hidden(cmd, capture_output=True, check=True).stdout
     x = np.frombuffer(raw, dtype=np.float32).reshape(-1, min(ch, 2)).astype(np.float64)
     if len(x) == 0:
         raise TimelineError(f"{path.name}: rien à analyser entre {start:.1f} s et {start + duration:.1f} s")
@@ -104,7 +106,7 @@ def measure_loudness_window(path: Path, start: float, duration: float) -> tuple[
     import tempfile
     with tempfile.TemporaryDirectory(prefix="kolnoa_q_") as tmp:
         wav = Path(tmp) / "w.wav"
-        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.6f}", "-t", f"{duration:.6f}", "-i", str(path), "-vn",
+        run_hidden(["ffmpeg", "-y", "-v", "error", "-ss", f"{start:.6f}", "-t", f"{duration:.6f}", "-i", str(path), "-vn",
                         "-ar", str(DECODE_SR), "-c:a", "pcm_f32le", str(wav)], check=True)
         m = measure_loudness(wav)
     return m.integrated_lufs, m.true_peak_dbtp

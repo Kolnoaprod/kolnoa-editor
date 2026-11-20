@@ -32,7 +32,7 @@ def ensure_tracks(session: Session, video: str, audio: str) -> None:
 
 def generate_first_edit(session: Session, shots: list[Shot], video: str = "V1", audio: str = "A1", at: int | None = None,
                         label: str = "Monte-moi cette séquence", durations: dict[str, float] | None = None,
-                        on_section: Callable[[str, int, int], None] | None = None) -> GenerationReport:
+                        on_section: Callable[[str, int, int], None] | None = None, *, on_file=None, on_file_done=None) -> GenerationReport:
     """Ajoute `shots` à la suite de la piste `video` (à partir de `at`, sinon la fin actuelle). Annulable d'un geste (`undo_group`),
     section par section ; `on_section(nom, début, fin)` permet à l'interface d'afficher le résultat progressivement."""
     ensure_tracks(session, video, audio)
@@ -46,6 +46,8 @@ def generate_first_edit(session: Session, shots: list[Shot], video: str = "V1", 
     with session.group(label, "auto", scope) as gid:
         cur, sec_start = None, pos
         for s in shots:
+            if on_file:
+                on_file(s.media)
             if s.section != cur:
                 if cur is not None and on_section:
                     on_section(cur, sec_start, pos)
@@ -55,6 +57,8 @@ def generate_first_edit(session: Session, shots: list[Shot], video: str = "V1", 
             tx = place_rush(session.tl, s.media, s.length, video, pos, s.src_in, "overwrite", audio, None, "video", "", src_len)
             session.do(tx, f"{s.section} : {s.media.rsplit('/', 1)[-1]} {s.src_in:.1f}s")
             pos += max(1, round(s.length * fps))
+            if on_file_done:
+                on_file_done(s.media)
         if cur is not None and on_section:
             on_section(cur, sec_start, pos)
     return GenerationReport(len(shots), sections, first, pos, gid if shots else None)

@@ -12,6 +12,9 @@ est ignorée (l'action correspondante n'avait pas été acquittée).
 
 from __future__ import annotations
 
+from copy import deepcopy
+import logging
+import tempfile
 import json
 import os
 import time
@@ -50,6 +53,7 @@ class Session:
         self._states: dict[str, str] = {}       # id de plan -> auto | manuel | valide (absent = manuel, protégé)
         self._group: tuple[str, str, P.Scope | None] | None = None   # (id de groupe, origine, portée) en cours
         self._group_seq = 0
+        self._pending: list[dict] | None = None
 
     # --- chemins ---------------------------------------------------------
     @property
@@ -107,6 +111,9 @@ class Session:
     def _replay(self, entry: dict) -> None:
         kind = entry["kind"]
         if kind == "do":
+            gid = entry.get("group") or ""
+            if gid.startswith("g") and gid[1:].isdigit():
+                self._group_seq = max(self._group_seq, int(gid[1:]))
             self._do(op_from_dict(entry["op"]), entry.get("label", ""), entry.get("origin", "manuel"), entry.get("group"),
                      replay=True)
         elif kind == "undo":
@@ -284,13 +291,58 @@ class Session:
         _write_json(path, self.tl.to_dict())
         return path
 
+    @contextmanager
+    def staged(self, before_commit):
+        """Travaille sur une copie privée et publie toutes les nouvelles entrées ensemble."""
+        original = self.journal_path.read_bytes()
+        draft = deepcopy(self)
+        draft._pending = []
+        yield draft
+        if self.journal_path.read_bytes() != original:
+            raise TimelineError("Le projet a été modifié pendant le montage.")
+        before_commit()
+        if draft._pending:
+            lines = original.splitlines()
+            if lines:
+                try:
+                    json.loads(lines[-1])
+                except json.JSONDecodeError:
+                    lines.pop()  # même récupération que lors de la réouverture
+            entries = [json.dumps(entry, ensure_ascii=False).encode("utf-8") for entry in draft._pending]
+            fd, name = tempfile.mkstemp(dir=self.dir, prefix="history-", suffix=".tmp")
+            tmp = Path(name)
+            try:
+                with os.fdopen(fd, "wb") as journal:
+                    journal.write(b"\n".join(lines + entries) + b"\n")
+                    journal.flush()
+                    os.fsync(journal.fileno())
+                tmp.replace(self.journal_path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        draft._pending = None
+        try:
+            draft._write_current()
+        except OSError:
+            logging.getLogger(__name__).exception("Impossible d'actualiser les fichiers dérivés du journal")
+
+    def adopt(self, draft):
+        """Installe le résultat publié en conservant les références au modèle des vues."""
+        self.tl.__dict__.update(draft.tl.__dict__)
+        self._undo, self._redo = draft._undo, draft._redo
+        self._states, self._group_seq = draft._states, draft._group_seq
+
     # --- fichiers ---------------------------------------------------------------
     def _append(self, entry: dict) -> None:
+        if self._pending is not None:
+            self._pending.append(entry)
+            return
         with open(self.journal_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
 
     def _write_current(self) -> None:
+        if self._pending is not None:
+            return
         _write_json(self.current_path, self.tl.to_dict())
         _write_json(self.provenance_path, dict(sorted(self._states.items())))   # dérivé du journal : reconstruit à l'ouverture

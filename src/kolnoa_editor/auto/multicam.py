@@ -12,6 +12,7 @@ from typing import Callable
 
 from ..sync.apply import plan_audio_sync, sync_group_audio
 from ..sync.sources import FileSource
+from ..ffmpeg import Cancelled
 from ..timeline import Scope, Session
 from ..timeline.model import Angle, MulticamGroup, Timeline, TimelineError
 from ..timeline.ops import AddGroup, add_multicam_clip
@@ -94,7 +95,7 @@ def create_group(session: Session, prop: GroupProposal, durations: dict[str, flo
 
 
 def sync_group(session: Session, gid: str, media_root, cfg=None, hint_tolerance: float = 90.0,
-               source_factory: Callable = FileSource) -> list[str]:
+               source_factory: Callable = FileSource, *, cancel=None, on_file=None) -> list[str]:
     """Synchro audio de tous les angles du groupe contre le maître (indice = horodatage). Un seul pas d'annulation ; renvoie les lignes de compte rendu."""
     from pathlib import Path
     g = session.tl.group(gid)
@@ -104,13 +105,18 @@ def sync_group(session: Session, gid: str, media_root, cfg=None, hint_tolerance:
         if not a.has_audio:
             continue
         try:
+            if on_file:
+                on_file(a.media)
             srcs[a.id] = source_factory(Path(media_root) / a.media)
+        except Cancelled:
+            raise
         except Exception as e:                           # noqa: BLE001 — fichier illisible : l'angle reste non synchronisé, dit clairement
             lines.append(f"{a.id}: audio illisible ({e})")
     if g.master not in srcs:
         raise TimelineError("le maître du groupe n'a pas d'audio lisible : synchro impossible")
     hints = {a.id: (a.offset, hint_tolerance) for a in g.angles if a.id != g.master}
-    est = sync_group_audio(session.tl, gid, srcs, cfg, hints)
+    est = sync_group_audio(session.tl, gid, srcs, cfg, hints, cancel,
+                           on_angle=(lambda a: on_file(a.media)) if on_file else None)
     rep = plan_audio_sync(session.tl, gid, est)
     if rep.op is not None:
         session.do(rep.op, f"synchro audio {gid}")
@@ -147,7 +153,7 @@ def _merge_spans(spans, gap):
 
 
 def analyze_group(session: Session, gid: str, media_root, g_from: float, g_to: float, durations: dict[str, float],
-                  params: VisualParams, cache_dir=None, proxy_for: Callable | None = None) -> tuple[dict, AnalysisStats]:
+                  params: VisualParams, cache_dir=None, proxy_for: Callable | None = None, *, cancel=None, on_file=None) -> tuple[dict, AnalysisStats]:
     """Échantillons visuels des angles fiables sur [g_from, g_to] (une passe ffmpeg par angle, mise en cache)."""
     from pathlib import Path
     stats = AnalysisStats()
@@ -157,15 +163,19 @@ def analyze_group(session: Session, gid: str, media_root, g_from: float, g_to: f
             continue
         t0, t1 = max(0.0, a.to_angle(g_from)), min(durations.get(a.media, 0.0), a.to_angle(g_to))
         try:
+            if on_file:
+                on_file(a.media)
             src = (proxy_for(a.media) if proxy_for else None) or Path(media_root) / a.media      # proxy à jour s'il existe : bien moins coûteux à décoder
-            out[a.id] = analyze_angle(src, t0, t1, params, Path(cache_dir) if cache_dir else None, stats)
+            out[a.id] = analyze_angle(src, t0, t1, params, Path(cache_dir) if cache_dir else None, stats, cancel=cancel)
+        except Cancelled:
+            raise
         except Exception as e:                           # noqa: BLE001 — angle illisible : traité comme sans mesure (repli), dit dans le compte rendu
             stats.notes.append(f"{a.id}: analyse impossible ({e})")
     return out, stats
 
 
 def generate_multicam_edit(session: Session, gid: str, picks: list[AnglePick], track: str = "V1", at: int | None = None,
-                           label: str = "Monte-moi cette séquence (multicam)") -> GenerationReport:
+                           label: str = "Monte-moi cette séquence (multicam)", *, on_file=None) -> GenerationReport:
     """Pose les plans multicam à la suite sur `track` (son = maître du groupe). Groupe `auto`, annulable d'un geste."""
     from .builder import ensure_tracks
     ensure_tracks(session, track, "A1")
@@ -178,6 +188,8 @@ def generate_multicam_edit(session: Session, gid: str, picks: list[AnglePick], t
     first = pos
     with session.group(label, "auto", Scope(pos, pos + total, (track,))) as grp:
         for p in picks:
+            if on_file:
+                on_file(tl.group(gid).angle(p.angle).media)
             frames = max(1, round((p.g_end - p.g_start) * fps))
             op = add_multicam_clip(session.tl, gid, p.angle, track, pos, frames, p.g_start)
             if p.why:
