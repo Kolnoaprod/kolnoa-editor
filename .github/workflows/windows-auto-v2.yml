@@ -1,11 +1,11 @@
-name: Kolnoa Editor Auto V2 — aperçu Windows
+name: Kolnoa Editor Import et musique — aperçu Windows
 
 # Fabrique KolnoaEditor.exe (éditeur complet) dans un zip, le vérifie par un autotest du parcours complet, puis le dépose en artefact du run.
 # Ne fusionne rien, ne publie aucune release : le zip se télécharge depuis la page du run (onglet Actions → Artifacts).
 on:
   workflow_dispatch:
   pull_request:
-    branches: [fix/v0.1.1-windows-stability]
+    branches: [feat/auto-montage-v2]
     paths: ["src/**", "tests/**", "pyproject.toml", "tools/winapp/**", ".github/workflows/windows-auto-v2.yml", "docs/AUTO_MONTAGE_V2.md"]
 
 jobs:
@@ -65,9 +65,9 @@ jobs:
           New-Item -ItemType Directory -Force pkg | Out-Null
           Copy-Item dist/KolnoaEditor pkg/ -Recurse
           Copy-Item docs/V0_1_1_WINDOWS.md pkg/KolnoaEditor/LISEZMOI.md
-          Copy-Item docs/AUTO_MONTAGE_V2.md pkg/KolnoaEditor/
-          Compress-Archive -Path pkg/KolnoaEditor -DestinationPath KolnoaEditor_AutoV2_preview.zip -Force
+          Copy-Item docs/AUTO_MONTAGE_V2.md, docs/IMPORT_MUSIQUE.md pkg/KolnoaEditor/
+          Compress-Archive -Path pkg/KolnoaEditor -DestinationPath KolnoaEditor_MediaMusic_preview.zip -Force
       - uses: actions/upload-artifact@v4
         with:
-          name: KolnoaEditor_AutoV2_preview
-          path: KolnoaEditor_AutoV2_preview.zip
+          name: KolnoaEditor_MediaMusic_preview
+          path: KolnoaEditor_MediaMusic_preview.zip

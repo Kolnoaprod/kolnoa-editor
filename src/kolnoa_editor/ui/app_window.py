@@ -18,6 +18,9 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QLis
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
+from ..app.media_manifest import MediaManifest
+from ..auto.music import place_music
+from ..auto.rhythm import analyze_music, beat_markers
 from ..auto.condensed import BalancedThresholds, MediaScope
 from ..auto.playhead import selection_from_playhead
 from ..ffmpeg import Cancelled
@@ -29,13 +32,18 @@ from .timeline_view import TimelineView
 
 
 class AppWindow(QMainWindow):
-    def __init__(self, controller: ProjectController, exporter=None, analyzer=None, player_factory=None, sync_source_factory=None):
+    def __init__(self, controller: ProjectController, exporter=None, analyzer=None, player_factory=None, sync_source_factory=None, manifest=None):
         super().__init__()
         self.player_factory = player_factory       # (controller, group_id) -> widget lecteur (avec `.player`) | None ; défaut : lecteur multicam réel
         self.sync_source_factory = sync_source_factory
         self.player_view = None
         self._player_gid = None
         self.ctl = controller
+        self.media_manifest = manifest or MediaManifest(controller.project.data / "Medias.klnprj")
+        self.media_manifest.add_video_references(self.ctl)
+        if self.media_manifest.active_sequence is not None:
+            self.ctl.session = self.media_manifest.open_sequence(self.ctl, self.media_manifest.active_sequence)
+        self.setAcceptDrops(True)
         self.exporter = exporter                 # (controller, chemin) -> rapport ; injectable (tests, lot J1-b)
         self.analyzer = analyzer
         self._operation = None
@@ -94,6 +102,16 @@ class AppWindow(QMainWindow):
                 a.setShortcut(QKeySequence(key))
             a.triggered.connect(lambda _=False, fn=fn: fn())
             f.addAction(a)
+        for text, action in (
+            ("Importer des fichiers…", self.choose_external_files),
+            ("Importer un dossier…", self.choose_external_folder),
+            ("Importer de la musique…", self.choose_music),
+            ("Chutier importé…", self.show_imported_media),
+            ("Enregistrer le projet .klnprj…", self.save_native_project),
+            ("Nouvelle séquence…", self.create_editorial_sequence),
+            ("Changer de séquence…", self.choose_editorial_sequence),
+        ):
+            f.addAction(text, action)
         e = mb.addMenu("&Édition")
         for text, key, fn in (("Annuler", "Ctrl+Z", self.undo), ("Rétablir", "Ctrl+Shift+Z", self.redo),
                               ("Point d'entrée", "I", self.set_in), ("Point de sortie", "O", self.set_out),
@@ -426,6 +444,160 @@ class AppWindow(QMainWindow):
             return f"{count} rush(es) vidéo importé(s)."
 
         self._start_operation("Importation des rushes", work, apply)
+
+    def choose_external_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "Importer des médias")
+        if paths:
+            self.import_references(paths)
+
+    def choose_external_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Importer un dossier de médias")
+        if folder:
+            from PySide6.QtWidgets import QMessageBox
+            recursive = QMessageBox.question(self, "Importer un dossier", "Inclure les sous-dossiers ?") == QMessageBox.Yes
+            self.import_references([folder], recursive=recursive)
+
+    def choose_music(self):
+        from PySide6.QtWidgets import QMessageBox
+        choice = QMessageBox.question(self, "Importer de la musique", "Importer un dossier musical ?",
+                                      QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+        if choice == QMessageBox.Yes:
+            folder = QFileDialog.getExistingDirectory(self, "Bibliothèque musicale")
+            if folder:
+                self.import_references([folder], music=True, recursive=True)
+        elif choice == QMessageBox.No:
+            paths, _ = QFileDialog.getOpenFileNames(self, "Fichiers musicaux")
+            if paths:
+                self.import_references(paths, music=True)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and all(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasUrls() and all(url.isLocalFile() for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+            self.import_references([url.toLocalFile() for url in event.mimeData().urls()])
+        else:
+            super().dropEvent(event)
+
+    def import_references(self, paths, **options):
+        def work(cancel, progress):
+            draft = MediaManifest(self.media_manifest.path)
+            draft.bind(self.ctl)
+            added = draft.import_paths(paths, cancel=cancel, progress=progress, **options)
+            return draft, added
+
+        def apply(result):
+            self.media_manifest, added = result
+            self.media_manifest.add_video_references(self.ctl)
+            self.refresh()
+            return f"{len(added)} nouvelle(s) référence(s) dans le chutier importé."
+
+        self._start_operation("Importation multimédia", work, apply)
+
+    def save_native_project(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Enregistrer le projet", "", "Projets Kolnoa (*.klnprj)")
+        if not path:
+            return
+        manifest = self.media_manifest
+        previous = manifest.path
+        manifest.path = Path(path).with_suffix(".klnprj")
+        try:
+            manifest.bind(self.ctl)
+            manifest.save()
+        except OSError as error:
+            manifest.path = previous
+            self.say(f"Enregistrement impossible : {error}")
+        else:
+            self.say(f"Projet enregistré · {manifest.path.name}")
+
+    def create_editorial_sequence(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        name, ok = QInputDialog.getText(self, "Nouvelle séquence", "Nom")
+        if ok:
+            try:
+                entry = self.media_manifest.create_sequence(self.ctl, name)
+                self.switch_editorial_sequence(entry.id)
+            except (OSError, ValueError, TimelineError) as error:
+                self.say(f"Création impossible : {error}")
+
+    def choose_editorial_sequence(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        entries = {"Projet · montage historique": None}
+        entries.update({f"Séquence · {seq.title}": seq.id for seq in self.media_manifest.sequences})
+        name, ok = QInputDialog.getItem(self, "Séquences du projet", "Séquence", list(entries), editable=False)
+        if ok:
+            try:
+                self.switch_editorial_sequence(entries[name])
+            except (OSError, ValueError, TimelineError) as error:
+                self.say(f"Ouverture impossible : {error}")
+
+    def switch_editorial_sequence(self, sequence_id):
+        session = self.media_manifest.open_sequence(self.ctl, sequence_id)
+        self.pause()
+        self._grab_timer.stop()
+        self._preview_request = None
+        self._player_gid = object()
+        self.ctl.session = self.tlv.session = session
+        self.tlv.selection = []
+        self.mark_in = self.mark_out = None
+        self.tlv.set_playhead(0)
+        self._show_preview(None, black=True)
+        self.refresh()
+        self.say(f"Séquence active · {session.tl.title}")
+
+    def show_imported_media(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        categories = {"video": "Vidéo", "music": "Musique", "audio": "Audio", "image": "Photo"}
+        items = {f"{categories[ref.kind]} · {ref.title} · {ref.path}": ref for ref in self.media_manifest.media}
+        if not items:
+            self.say("Le chutier importé est vide.")
+            return
+        name, ok = QInputDialog.getItem(self, "Chutier importé", "Média", list(items), editable=False)
+        if ok and items[name].kind == "music":
+            actions = ["Analyser le tempo", "Poser sur la piste musique et créer les repères"]
+            action, chosen = QInputDialog.getItem(self, "Musique", "Action", actions, editable=False)
+            if chosen:
+                self.analyze_music_reference(items[name], place=action == actions[1])
+
+    def analyze_music_reference(self, ref, *, place=False):
+        def work(cancel, progress):
+            progress("Analyse des transitoires", ref.path, None, None, "Estimation du tempo")
+            rhythm = analyze_music(ref.path, cancel=cancel)
+            draft = None
+            marker_count = 0
+            if place:
+                with self.ctl.session.staged(cancel.raise_if_cancelled) as draft:
+                    from ..timeline import Scope
+
+                    length = max((c.end for c in draft.tl.clips if draft.tl.track(c.track).kind == "video"), default=0)
+                    with draft.group("Musique et repères", "directive", Scope(0, length)):
+                        clip_id = place_music(draft, ref.path, ref.duration or 0)
+                        clip = draft.tl.clip(clip_id)
+                        tx = beat_markers(draft.tl, rhythm, clip.start, clip.end)
+                        if tx.ops:
+                            draft.do(tx, "Repères musicaux")
+                            marker_count = len(tx.ops)
+            return rhythm, draft, marker_count
+
+        def apply(result):
+            rhythm, draft, count = result
+            if draft is not None:
+                self.ctl.session.adopt(draft)
+                self.refresh()
+            if rhythm.bpm is None:
+                return "Musique posée. Tempo incertain." if place else "Tempo incertain."
+            self._operation.log.appendPlainText(f"{len(rhythm.beats)} battements détectés dans {ref.title}.")
+            summary = f"{ref.title} · tempo estimé {rhythm.bpm:.1f} BPM."
+            return f"{summary} Musique posée, {count} repère(s)." if place else summary
+
+        self._start_operation("Analyse musicale", work, apply)
 
     def selected_sequence(self) -> str | None:
         it = self.rushes.currentItem()
