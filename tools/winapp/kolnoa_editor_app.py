@@ -69,7 +69,7 @@ def selftest() -> int:
     assert info.duration > 1 and info.width == 1920, f"export {info}"
     from PySide6.QtWidgets import QApplication
     from kolnoa_editor.ui.app_window import AppWindow
-    app = QApplication([])
+    app = QApplication.instance() or QApplication([])
     win = AppWindow(c2, player_factory=lambda ctl, g: None)
     win.show()
     win.tlv.set_playhead(25)
@@ -87,25 +87,61 @@ def main(argv: list[str]) -> int:
         return selftest()
     from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
     app = QApplication.instance() or QApplication(argv)
+    app.setQuitOnLastWindowClosed(False)                     # le moteur survit à la fermeture de la fenêtre ; « Quitter » (icône) l'arrête
+    from kolnoa_editor.app import ProjectController
+    from kolnoa_editor.app.engine import EngineAlreadyRunning, ResidentEngine
+    from kolnoa_editor.ui.activation import ActivationServer, notify_running_instance
+    from kolnoa_editor.ui.app_window import AppWindow
+    from kolnoa_editor.ui.tray import TrayController
+    engine = ResidentEngine()
+    try:
+        engine.start()
+    except EngineAlreadyRunning:
+        notify_running_instance()                            # réveille la fenêtre de l'instance existante, puis on s'efface
+        return 0
     args = [a for a in argv[1:] if not a.startswith("--")]
+    minimized = "--minimized" in argv
     if "--demo" in argv and args:
         make_demo(Path(args[0]))
-    folder = args[0] if args and Path(args[0]).is_dir() else QFileDialog.getExistingDirectory(None, "Dossier de rushes du projet")
+    folder = args[0] if args and Path(args[0]).is_dir() else ""
+    if not folder and engine.settings.last_project and Path(engine.settings.last_project).is_dir():
+        folder = engine.settings.last_project
     if not folder:
-        return 0
-    from kolnoa_editor.app import ProjectController
-    from kolnoa_editor.ui.app_window import AppWindow
-    root = Path(folder)
-    try:
-        ctl = ProjectController.open(root, data_dir_for(root))
-        if not ctl.rushes:
-            ctl.import_rushes()
-    except Exception as e:                                   # noqa: BLE001 — message clair plutôt qu'une fenêtre qui disparaît
-        QMessageBox.critical(None, "Kolnoa Editor", f"Impossible d'ouvrir le projet :\n{e}")
-        return 1
-    win = AppWindow(ctl)
-    win.show()
-    return app.exec()
+        if minimized:                                        # démarrage de session sans projet : icône seule
+            folder = ""
+        else:
+            folder = QFileDialog.getExistingDirectory(None, "Dossier de rushes du projet")
+            if not folder:
+                engine.shutdown()
+                return 0
+    win = None
+    tray = None
+    if folder:
+        root = Path(folder)
+        try:
+            ctl = ProjectController.open(root, data_dir_for(root))
+            if not ctl.rushes:
+                ctl.import_rushes()
+        except Exception as e:                               # noqa: BLE001 — message clair plutôt qu'une fenêtre qui disparaît
+            QMessageBox.critical(None, "Kolnoa Editor", f"Impossible d'ouvrir le projet :\n{e}")
+            engine.shutdown()
+            return 1
+        engine.attach_project(ctl)
+        win = AppWindow(ctl)
+        win.engine = engine
+    else:
+        from PySide6.QtWidgets import QLabel
+        win = QLabel("Kolnoa Editor tourne en arrière-plan.\nOuvrez un dossier de rushes en relançant l'application.")
+    tray = TrayController(app, engine, win)
+    if hasattr(win, "tray"):
+        win.tray = tray
+    act = ActivationServer()
+    act.show_requested.connect(tray.show_window)
+    if not (minimized and tray.available):
+        win.show()
+    code = app.exec()
+    engine.shutdown()
+    return code
 
 
 if __name__ == "__main__":

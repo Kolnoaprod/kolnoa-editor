@@ -5,8 +5,8 @@ name: Kolnoa Editor V0.1 (EXE portable Windows)
 on:
   workflow_dispatch:
   push:
-    branches: [feat/v0.1-windows]
-    paths: ["src/**", "tools/winapp/**", ".github/workflows/windows-editor-v01.yml", "docs/V0_1_BILAN.md"]
+    branches: [feat/v0.1-windows, feat/tray-background]
+    paths: ["src/**", "tests/**", "tools/winapp/**", ".github/workflows/windows-editor-v01.yml", "docs/V0_1_BILAN.md"]
 
 jobs:
   build:
@@ -40,7 +40,7 @@ jobs:
           $env:PATH = "$PWD\tools\winapp\ffmpeg_bin;$env:PATH"
           $env:QT_QPA_PLATFORM = "offscreen"
           python -m pip install -e .
-          python -m pytest tests/test_v01_transport.py tests/test_app_window.py tests/test_integration_beta.py tests/test_render_timeline.py -q
+          python -m pytest tests/test_v01_transport.py tests/test_app_window.py tests/test_integration_beta.py tests/test_render_timeline.py tests/test_resident.py tests/test_tray.py -q
       - name: PyInstaller
         shell: cmd
         run: >
@@ -54,6 +54,23 @@ jobs:
           Get-Content selftest.txt
           "code de sortie : $($p.ExitCode)"
           if ($p.ExitCode -ne 0) { throw "autotest de l'EXE échoué" }
+      - name: Instance unique de l'EXE (deux lancements ne donnent qu'un moteur)
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:KOLNOA_ENGINE_DIR = "$PWD\engine_test"
+          $demo = "$PWD\demo_rushes"
+          $first = Start-Process dist/KolnoaEditor.exe -ArgumentList "--minimized","--demo",$demo -PassThru
+          Start-Sleep 25
+          if ($first.HasExited) { throw "la première instance s'est arrêtée (code $($first.ExitCode))" }
+          $second = Start-Process dist/KolnoaEditor.exe -ArgumentList "--minimized" -PassThru
+          $second.WaitForExit(30000) | Out-Null
+          if (-not $second.HasExited) { $second.Kill(); throw "la seconde instance ne s'est pas effacée" }
+          "seconde instance : code $($second.ExitCode)"
+          if ($second.ExitCode -ne 0) { throw "code de sortie inattendu" }
+          if ($first.HasExited) { throw "la première instance a été tuée par la seconde" }
+          $first.Kill()
+          "OK : une seule instance"
       - name: Zip (EXE + mode d'emploi)
         shell: pwsh
         run: |

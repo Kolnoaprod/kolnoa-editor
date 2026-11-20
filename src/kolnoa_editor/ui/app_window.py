@@ -26,6 +26,8 @@ from .timeline_view import TimelineView
 
 
 class AppWindow(QMainWindow):
+    _job_done = Signal(str, str, str)
+
     def __init__(self, controller: ProjectController, exporter=None, analyzer=None, player_factory=None, sync_source_factory=None):
         super().__init__()
         self.player_factory = player_factory       # (controller, group_id) -> widget lecteur (avec `.player`) | None ; défaut : lecteur multicam réel
@@ -35,6 +37,9 @@ class AppWindow(QMainWindow):
         self.ctl = controller
         self.exporter = exporter                 # (controller, chemin) -> rapport ; injectable (tests, lot J1-b)
         self.analyzer = analyzer
+        self._job_done.connect(self._on_job_done)
+        self.engine = None                       # ResidentEngine (optionnel) : tâches en arrière-plan, réglages
+        self.tray = None                         # TrayController (optionnel)
         self.setWindowTitle("Kolnoa Editor")
         self.resize(1500, 900)
         self.peaks = PeakService(cache_dir=self.ctl.project.data / "peaks")
@@ -83,6 +88,11 @@ class AppWindow(QMainWindow):
             if key:
                 a.setShortcut(QKeySequence(key))
             a.triggered.connect(lambda _=False, fn=fn: fn())
+            f.addAction(a)
+        if True:
+            a = QAction("Paramètres…", self)
+            a.triggered.connect(lambda _=False: self.open_settings())
+            f.addSeparator()
             f.addAction(a)
         e = mb.addMenu("&Édition")
         for text, key, fn in (("Annuler", "Ctrl+Z", self.undo), ("Rétablir", "Ctrl+Shift+Z", self.redo),
@@ -391,6 +401,9 @@ class AppWindow(QMainWindow):
         path = path or QFileDialog.getSaveFileName(self, "Exporter en MP4", str(self.ctl.project.renders_dir / "film.mp4"), "MP4 (*.mp4)")[0]
         if not path:
             return
+        if self.engine is not None and self.exporter is None:
+            self._export_in_background(Path(path), resolution)
+            return
         try:
             rep = (self.exporter or (lambda c, p, r: c.export(p, resolution=r)))(self.ctl, Path(path), resolution)
             warn = getattr(rep, "warnings", None) or []
@@ -399,7 +412,39 @@ class AppWindow(QMainWindow):
             self.say(f"Export impossible : {e}")
             QMessageBox.warning(self, "Export", str(e))
 
+    def _export_in_background(self, path: Path, resolution: str) -> None:
+        """Rendu dans une tâche du moteur : la fenêtre reste utilisable, l'avancement est visible dans le menu de l'icône, fermer la fenêtre n'interrompt rien."""
+        jobs = self.engine.jobs
+
+        def work(job):
+            def prog(i, n, what):
+                jobs.update(job, progress=min(0.99, i / max(1, n)), message=what)
+            return self.ctl.export(path, on_progress=prog, cancel=job.cancel, resolution=resolution)
+
+        def done(job, rep, err):
+            self._job_done.emit(job.state, str(path), "; ".join(getattr(rep, "warnings", None) or []) or (str(err) if err else ""))
+
+        jobs.run("export", f"Export {path.name} ({resolution})", work, project=str(self.ctl.project.root), on_done=done)
+        self.say(f"Export lancé en arrière-plan : {path.name} (avancement : icône Kolnoa près de l'horloge, menu « Tâches en cours »).")
+
+    def _on_job_done(self, state: str, path: str, detail: str) -> None:
+        self.say({"done": f"Exporté : {path}", "failed": f"Export impossible : {detail}", "cancelled": "Export annulé."}.get(state, state)
+                 + (f" — {detail}" if state == "done" and detail else ""))
+
+    def open_settings(self) -> None:
+        if self.engine is None:
+            self.say("Paramètres indisponibles (moteur résident non démarré).")
+            return
+        from .settings_dialog import SettingsDialog
+        SettingsDialog(self.engine, self).exec()
+        if self.tray is not None:
+            self.tray.act_auto.setChecked(self.engine.settings.start_with_windows)
+            self.tray.act_bg.setChecked(self.engine.settings.keep_running_on_close)
+
     def closeEvent(self, e) -> None:
+        if self.tray is not None and self.tray.hide_to_tray():
+            e.ignore()                                          # le moteur continue ; « Quitter » de l'icône arrête vraiment
+            return
         self.peaks.close()
         super().closeEvent(e)
 
