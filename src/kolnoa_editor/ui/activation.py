@@ -38,4 +38,6 @@ class ActivationServer(QObject):
         sock = self.server.nextPendingConnection()
         if sock is None:
             return
-        sock.readyRead.connect(lambda s=sock: (s.readAll(), self.show_requested.emit(), s.disconnectFromServer()))
+        # La connexion elle-même vaut message « montre-toi » : ne pas dépendre de readyRead, déjà passé sous Windows quand on s'y abonne trop tard.
+        sock.disconnected.connect(sock.deleteLater)
+        self.show_requested.emit()
