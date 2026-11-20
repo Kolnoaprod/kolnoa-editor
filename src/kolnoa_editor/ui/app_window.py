@@ -8,11 +8,12 @@ Lecteur multicam intégré : lot suivant (le composant existe : `MulticamView`).
 
 from __future__ import annotations
 
-import time
+import tempfile
 from copy import copy
 from pathlib import Path
+from uuid import uuid4
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
@@ -72,11 +73,11 @@ class AppWindow(QMainWindow):
         self.play_btn = QPushButton("▶ Lecture")
         self.play_btn.clicked.connect(self.toggle_play)
         self._playing = False
-        self._play_t0 = 0.0
-        self._play_f0 = 0
-        self._ticker = QTimer(self)
-        self._ticker.setInterval(30)
-        self._ticker.timeout.connect(self._tick)
+        self._playback_dir = None
+        self._playback_key = None
+        self._program_player = None
+        self._player_clock_update = False
+        self._pending_program_seek = None
         self._grab_timer = QTimer(self)
         self._grab_timer.setSingleShot(True)
         self._grab_timer.setInterval(60)
@@ -171,6 +172,7 @@ class AppWindow(QMainWindow):
         self.status.setText(text)
 
     def refresh(self) -> None:
+        self.pause()
         self.rushes.clear()
         for seq, n in self.ctl.sequences().items():
             it = QListWidgetItem(f"{seq or '(sans dossier)'}   ·   {n} rush(es)")
@@ -209,39 +211,134 @@ class AppWindow(QMainWindow):
         if self._playing:
             self.pause()
             return
-        total = max((c.end for c in self.ctl.tl.clips), default=0)
+        tl = self.ctl.tl
+        total = max((c.end for c in tl.clips if tl.track(c.track).kind == "video"), default=0)
         if total <= 0:
             self.say("Rien à lire : importez des rushes puis lancez « Monte-moi cette séquence ».")
             return
-        if self.tlv.playhead >= total:
+        if self.tlv.playhead >= total - 1:
             self.tlv.set_playhead(0)
-        self._playing, self._play_t0, self._play_f0 = True, time.monotonic(), self.tlv.playhead
+        key = tl.canonical()
+        if self._playback_key == key and self._program_player is not None:
+            self._start_program_player()
+            return
+        if self._playback_dir is None:
+            self.ctl.project.data.mkdir(parents=True, exist_ok=True)
+            self._playback_dir = tempfile.TemporaryDirectory(prefix="lecture-", dir=self.ctl.project.data, ignore_cleanup_errors=True)
+        if self._program_player is not None:
+            previous = self._program_player.source().toLocalFile()
+            self._program_player.setSource(QUrl())
+            if previous:
+                try:
+                    Path(previous).unlink(missing_ok=True)
+                except PermissionError:
+                    pass  # Windows peut garder la source ouverte jusqu'à la fin du décodage.
+        self._playback_key = None
+        path = Path(self._playback_dir.name) / f"lecture-{uuid4().hex}.mp4"
+
+        def build(cancel, progress):
+            progress("Préparation de la lecture", None, None, None, "Rendu vidéo léger et mixage de la timeline")
+
+            def segment(i, count, media):
+                assembling = i == count and media == "assemblage"
+                progress("Mixage et assemblage" if assembling else "Préparation vidéo", media,
+                         count if assembling else i - 1, count + 1, None)
+
+            self.ctl.export(path, kind="proxy", resolution=(1920, 1080), cancel=cancel, on_progress=segment)
+            return path
+
+        def ready(path):
+            self._open_program_player(path)
+            self._playback_key = key
+            QTimer.singleShot(0, self._start_program_player)
+            QTimer.singleShot(0, self._operation.close)
+            return "Aperçu de lecture prêt · son de la timeline inclus."
+
+        self._start_operation("Préparation de la lecture", build, ready)
+
+    def _open_program_player(self, path: Path):
+        from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+        from PySide6.QtMultimediaWidgets import QVideoWidget
+
+        if self._program_player is None:
+            self._program_player = QMediaPlayer(self)
+            self._program_audio = QAudioOutput(self)
+            self._program_video = QVideoWidget(self)
+            self._program_video.hide()
+            self.view_box.insertWidget(0, self._program_video, 1)
+            self._program_player.setAudioOutput(self._program_audio)
+            self._program_player.setVideoOutput(self._program_video)
+            self._program_player.positionChanged.connect(self._update_from_player)
+            self._program_player.seekableChanged.connect(self._program_seekable)
+            self._program_player.mediaStatusChanged.connect(self._program_status_changed)
+            self._program_player.errorOccurred.connect(self._program_error)
+        self._program_player.setSource(QUrl.fromLocalFile(str(path)))
+
+    def _start_program_player(self):
+        self._grab_timer.stop()
+        self._preview_request = None
+        self._playing = True
+        self.preview.hide()
+        self._program_video.show()
         self.play_btn.setText("⏸ Pause")
-        self._ticker.start()
+        self._seek_program(self.tlv.playhead)
+        self._program_player.play()
+
+    def _seek_program(self, frame):
+        milliseconds = round(frame * 1000 / self.ctl.tl.fps)
+        if self._program_player.isSeekable():
+            self._pending_program_seek = None
+            self._program_player.setPosition(milliseconds)
+        else:
+            self._pending_program_seek = milliseconds
+
+    def _program_seekable(self, seekable):
+        if seekable and self._pending_program_seek is not None:
+            position = self._pending_program_seek
+            self._pending_program_seek = None
+            self._program_player.setPosition(position)
+
+    def _program_status_changed(self, status):
+        from PySide6.QtMultimedia import QMediaPlayer
+
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self.pause()
+
+    def _program_error(self, error, message):
+        self._playback_key = None
+        self.pause()
+        self.say(f"Lecture impossible : {message}")
+
+    def _update_from_player(self, milliseconds):
+        if not self._playing or self._pending_program_seek is not None:
+            return
+        self._player_clock_update = True
+        try:
+            self.tlv.set_playhead(round(milliseconds * self.ctl.tl.fps / 1000))
+        finally:
+            self._player_clock_update = False
 
     def pause(self) -> None:
-        self._playing = False
-        self._ticker.stop()
+        if self._playing:
+            self._playing = False
+            self._program_player.pause()
+            self._program_video.hide()
+            self.preview.show()
+            self._grab_timer.start()
         self.play_btn.setText("▶ Lecture")
-
-    def _tick(self) -> None:
-        total = max((c.end for c in self.ctl.tl.clips), default=0)
-        f = self._play_f0 + int((time.monotonic() - self._play_t0) * self.ctl.tl.fps)
-        if f >= total:
-            self.tlv.set_playhead(max(0, total - 1))
-            self.pause()
-            return
-        self.tlv.set_playhead(f)
 
     def _on_playhead(self, frame: int) -> None:
         fps = self.ctl.tl.fps
         s = frame // fps
         self.timecode.setText(f"{s // 3600:02d}:{s // 60 % 60:02d}:{s % 60:02d}:{frame % fps:02d}")
-        if not self._grab_timer.isActive():
+        if self._playing:
+            if not self._player_clock_update:
+                self._seek_program(frame)
+        elif not self._grab_timer.isActive():
             self._grab_timer.start()
 
     def _request_preview(self) -> None:
-        if self._operation is not None and self._operation.running:
+        if self._playing or (self._operation is not None and self._operation.running):
             return
         request = frame_request(self.ctl.tl, self.tlv.playhead)
         self._preview_request = request
@@ -284,7 +381,7 @@ class AppWindow(QMainWindow):
 
     def _seek_player(self, frame: int) -> None:
         pv = self.player_view
-        if pv is not None and hasattr(pv, "player"):
+        if not self._playing and pv is not None and hasattr(pv, "player"):
             pv.player.seek(frame / self.ctl.tl.fps)
 
     def angles_of_selection(self) -> list[str]:
@@ -341,6 +438,7 @@ class AppWindow(QMainWindow):
         return True
 
     def _edited(self, label: str) -> None:
+        self.pause()
         self.say(label)
         self._update_zone()
 
@@ -733,9 +831,17 @@ class AppWindow(QMainWindow):
             self._operation.cancel_or_close()
             e.ignore()
             return
+        self._preview_request = None
         if self._preview_worker is not None:
             self._preview_worker.cancel.cancel()
             self._preview_worker.wait()
+        self.pause()
+        self._grab_timer.stop()
+        if self._program_player is not None:
+            self._program_player.stop()
+            self._program_player.setSource(QUrl())
+        if self._playback_dir is not None:
+            self._playback_dir.cleanup()
         self.peaks.close()
         super().closeEvent(e)
 

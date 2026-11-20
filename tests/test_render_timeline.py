@@ -100,3 +100,20 @@ def test_output_resolution_choice_with_mixed_source_sizes(tmp_path):
         assert abs(i.duration - 2.0) < 0.15 and abs((i.fps or 0) - 50) < 0.5          # 50 i/s conservés
     with pytest.raises(ValueError):
         render_timeline(tl, tmp_path, tmp_path / "x.mp4", tmp_path / "cache", resolution="8k")
+
+
+def test_render_accepts_subframe_rounding_on_existing_project(tmp_path):
+    from kolnoa_editor.timeline.flatten import check_flatten
+
+    source = tmp_path / "rush.mp4"
+    make_media(source, "red", 440, dur=7.68)
+    assert probe(source).duration == pytest.approx(7.680, abs=.001)
+    tl = tl_of([Clip("s001", "V1", "rush.mp4", 0, 384, .004),
+                Clip("s351", "V1", "rush.mp4", 384, 384, .004)])
+    tl.fps = 50
+    report = render_timeline(tl, tmp_path, tmp_path / "lecture.mp4", tmp_path / "cache", kind="proxy")
+    assert report.frames == 768 and probe(report.output).has_audio
+    assert sum("fin de source ajustée" in w for w in report.warnings) == 2
+    tl.clips[-1].duration += 1
+    assert any(issue.level == "error" and "s351" in issue.message
+               for issue in check_flatten(tl, source_len=lambda _: 7.680))

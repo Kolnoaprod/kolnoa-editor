@@ -321,3 +321,25 @@ def test_sources_are_never_modified(tmp_path):
     execute(tl, set_audio_settings(tl, target_lufs=-20.0))
     render(tl, tmp_path)
     assert sha(tmp_path / "t.wav") == before
+
+
+def test_audio_falls_back_after_master_ends(tmp_path):
+    rec = tone(400, 3.0, 0.25)
+    other = tone(900, 7.0, 0.45)
+    tl = group_tl(tmp_path, rec, other, offset=1.0, rec_len=7.0)
+    out, report = render(tl, tmp_path, "fallback.wav")
+    assert np.max(np.abs(seg(out, 1.4, 2.5))) == pytest.approx(.25, abs=.02)
+    assert np.max(np.abs(seg(out, 4.0, 5.0))) == pytest.approx(.45, abs=.02)
+    assert any("son repris" in warning for warning in report.warnings)
+
+
+def test_windowed_mix_preserves_samples_at_boundaries(tmp_path, monkeypatch):
+    write_wav(tmp_path / "take.wav", tone(440, 10.0, .25))
+    write_wav(tmp_path / "back.wav", tone(820, 10.0, .15))
+    tl = tl_with(Clip("a1", "A1", "take.wav", 0, 150, .5, fade_in=2.5, fade_out=2.5),
+                 Clip("a2", "A1", "back.wav", 150, 50, 2.0))
+    reference, _ = render(tl, tmp_path, "reference.wav")
+    monkeypatch.setattr("kolnoa_editor.timeline.audio_mix.MIX_WINDOW_SECONDS", 2)
+    actual, _ = render(tl, tmp_path, "windowed.wav")
+    assert actual.shape == reference.shape
+    assert np.max(np.abs(actual - reference)) < .002

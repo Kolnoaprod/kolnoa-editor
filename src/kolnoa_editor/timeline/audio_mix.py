@@ -14,7 +14,7 @@ import math
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ..ffmpeg import CancelToken, ffmpeg_bin, ffprobe_bin, run, run_hidden
@@ -72,7 +72,7 @@ def _audible_strips(strips: list[AudioStrip]) -> list[AudioStrip]:
     return live
 
 
-def build_mix_plan(tl: Timeline) -> MixPlan:
+def build_mix_plan(tl: Timeline, audio_durations: dict[str, float | None] | None = None) -> MixPlan:
     plan = MixPlan(sample_rate=tl.audio_settings.sample_rate)
     solo_tracks = {t.id for t in tl.tracks if t.solo}
     sw = tl.audio_settings.switch_fade_ms / 1000.0
@@ -92,7 +92,7 @@ def build_mix_plan(tl: Timeline) -> MixPlan:
             continue
         gain = tl.source_gain_db + tr.gain_db + c.gain_db
         if c.audio == "group":
-            evs = _group_events(tl, c, gain, sw, plan)
+            evs = _group_events(tl, c, gain, sw, plan, audio_durations)
         else:
             evs = [MixEvent(c.id, c.track, c.media, c.start / tl.fps, c.duration / tl.fps, c.src_in,
                             float((c.extra or {}).get('speed', 1.0)), gain, c.strips,
@@ -120,14 +120,25 @@ def build_mix_plan(tl: Timeline) -> MixPlan:
     return plan
 
 
-def _group_events(tl: Timeline, c: Clip, gain: float, sw: float, plan: MixPlan) -> list[MixEvent]:
+def _group_events(tl: Timeline, c: Clip, gain: float, sw: float, plan: MixPlan, audio_durations=None) -> list[MixEvent]:
     """Plan multicam « audio=group » : le son suit l'axe du groupe, avec la source maître de chaque séquence."""
     g = tl.group(c.group)
     A = g.angle(c.angle)
     t0 = A.to_group(c.src_in)
     t1 = A.to_group(c.src_in + c.duration / tl.fps)
     cuts = sorted({v for r in tl.masters if r.group == g.id for v in (r.start, r.end) if t0 + EPS < v < t1 - EPS})
-    edges = [t0, *cuts, t1]
+    if audio_durations is not None:
+        for angle in g.angles:
+            if not angle.usable or angle.media not in audio_durations:
+                continue
+            duration = audio_durations[angle.media]
+            limits = [angle.to_group(0)]
+            if duration is not None:
+                limits.append(angle.to_group(duration))
+            if angle.range:
+                limits.extend(angle.to_group(value) for value in angle.range)
+            cuts.extend(v for v in limits if t0 + EPS < v < t1 - EPS)
+    edges = [t0, *sorted(set(cuts)), t1]
     def ts(tg):                                              # instant de groupe → seconde de timeline
         return c.start / tl.fps + (A.to_angle(tg) - c.src_in)
     evs: list[MixEvent] = []
@@ -138,8 +149,27 @@ def _group_events(tl: Timeline, c: Clip, gain: float, sw: float, plan: MixPlan) 
             plan.warnings.append(f"{c.id}: la source {src} n'est plus synchronisée de façon fiable : maître du groupe utilisé")
             M = g.angle(g.master)
             src = g.master
+        if audio_durations is not None:
+            def covers(angle):
+                if not angle.usable or angle.media not in audio_durations:
+                    return False
+                position = angle.to_angle((a + b) / 2)
+                duration = audio_durations[angle.media]
+                return (position >= 0 and (duration is None or position < duration)
+                        and (angle.range is None or angle.range[0] <= position < angle.range[1]))
+
+            if not covers(M):
+                fallback = next((angle for angle in (A, g.angle(g.master), *g.angles) if covers(angle)), None)
+                if fallback is None:
+                    plan.warnings.append(f"{c.id}: aucun angle audio fiable sur {a:.2f}–{b:.2f} s")
+                    continue
+                plan.warnings.append(f"{c.id}: son repris sur l'angle {fallback.id} sur {a:.2f}–{b:.2f} s")
+                M, src = fallback, fallback.id
         tempo = (1 + A.drift_ppm * 1e-6) / (1 + M.drift_ppm * 1e-6)
-        evs.append(MixEvent(c.id, c.track, M.media, ts(a), ts(b) - ts(a), M.to_angle(a), tempo, gain, c.strips, angle=src))
+        if evs and evs[-1].angle == src and abs(evs[-1].end - ts(a)) < EPS:
+            evs[-1].duration = ts(b) - evs[-1].t_start
+        else:
+            evs.append(MixEvent(c.id, c.track, M.media, ts(a), ts(b) - ts(a), max(0.0, M.to_angle(a)), tempo, gain, c.strips, angle=src))
     for i, e in enumerate(evs):
         e.fade_in, e.fade_in_curve = (c.fade_in, c.fade_in_curve) if i == 0 else (min(sw, e.duration / 2), "linear")
         e.fade_out, e.fade_out_curve = (c.fade_out, c.fade_out_curve) if i == len(evs) - 1 else (min(sw, e.duration / 2), "linear")
@@ -200,7 +230,8 @@ def _pan_expr(ev: MixEvent, channels: int) -> str:
     return f"pan=stereo|FL={'+'.join(fl_s) or '0*c0'}|FR={'+'.join(fr_s) or '0*c0'}"
 
 
-def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) -> tuple[list[str], str]:
+def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float, *,
+                      window_start: float | None = None, input_offsets=None) -> tuple[list[str], str]:
     """(liste des médias dans l'ordre des entrées ffmpeg, graphe filter_complex). Les événements sans audio sont ignorés."""
     sr = plan.sample_rate
     media = list(dict.fromkeys(e.media for e in plan.events if e.media in infos))
@@ -216,7 +247,8 @@ def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) 
         for j, e in enumerate(uses[m]):
             ch = infos[m].channels
             src_dur = e.duration * e.tempo
-            chain = [f"atrim=start={e.src_start:.6f}:duration={src_dur:.6f}", "asetpts=PTS-STARTPTS"]
+            input_start = max(0.0, e.src_start - (input_offsets or {}).get(m, 0.0))
+            chain = [f"atrim=start={input_start:.6f}:duration={src_dur:.6f}", "asetpts=PTS-STARTPTS"]
             if abs(e.tempo - 1.0) > 1e-9 and abs(e.tempo - 1.0) > 0.01:
                 chain.append(f'atempo={e.tempo:.8f}')
             elif abs(e.tempo - 1.0) > 1e-9:
@@ -233,7 +265,15 @@ def build_filtergraph(plan: MixPlan, infos: dict[str, AudioInfo], total: float) 
                 chain.append(f"afade=t=in:st=0:d={e.fade_in:.6f}:curve={CURVE[e.fade_in_curve]}")
             if e.fade_out > 0:
                 chain.append(f"afade=t=out:st={max(0.0, e.duration - e.fade_out):.6f}:d={e.fade_out:.6f}:curve={CURVE[e.fade_out_curve]}")
-            delay = max(0, round(e.t_start * sr))
+            delay_start = e.t_start
+            if window_start is not None:
+                left = max(window_start, e.t_start)
+                right = min(window_start + total, e.end)
+                trim_start = max(0, round(left * sr) - round(e.t_start * sr))
+                trim_end = round(right * sr) - round(e.t_start * sr)
+                chain += [f"atrim=start_sample={trim_start}:end_sample={trim_end}", "asetpts=N/SR/TB"]
+                delay_start -= window_start
+            delay = max(0, round(delay_start * sr))
             if delay:
                 chain.append(f"adelay=delays={delay}S:all=1")
             lab = f"e{k}_{j}"
@@ -293,6 +333,54 @@ def _run(cmd: list[str], cancel=None) -> None:
         raise TimelineError("ffmpeg a échoué : " + "\n".join(r.stderr.strip().splitlines()[-6:]))
 
 
+MIX_WINDOW_SECONDS = 60
+
+
+def _render_dry(plan, infos, total, media_root, directory, dry, cancel):
+    """Borne la taille du graphe audio en traitant de courts blocs au temps du programme."""
+    script = directory / "graph.txt"
+    inputs = [ffmpeg_bin(), "-y", "-v", "error"]
+
+    def render_block(piece, duration, path, start=None):
+        offsets = {}
+        if start is not None:
+            for event in piece.events:
+                offsets[event.media] = min(event.src_start, offsets.get(event.media, event.src_start))
+        media, graph = build_filtergraph(piece, infos, duration, window_start=start, input_offsets=offsets)
+        script.write_text(graph, encoding="utf-8")
+        cmd = list(inputs)
+        for name in media:
+            offset = offsets.get(name, 0.0)
+            if offset > 0:
+                cmd += ["-ss", f"{offset:.6f}"]
+            cmd += ["-i", str(media_root / name)]
+        cmd += [*_filter_script_args(str(script)), "-map", "[out]", "-t", f"{duration:.6f}",
+                "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(path)]
+        _run(cmd, cancel)
+
+    if total <= MIX_WINDOW_SECONDS:
+        render_block(plan, total, dry)
+        return
+
+    blocks = []
+    end_sample = round(total * plan.sample_rate)
+    step = MIX_WINDOW_SECONDS * plan.sample_rate
+    for index, sample in enumerate(range(0, end_sample, step)):
+        if cancel is not None:
+            cancel.raise_if_cancelled()
+        start = sample / plan.sample_rate
+        end = min(sample + step, end_sample) / plan.sample_rate
+        events = [e for e in plan.events if round(e.end * plan.sample_rate) > sample
+                  and round(e.t_start * plan.sample_rate) < min(sample + step, end_sample)]
+        path = directory / f"block-{index:05}.wav"
+        render_block(replace(plan, events=events), end - start, path, start)
+        blocks.append(path)
+    playlist = directory / "blocks.txt"
+    playlist.write_text("".join("file '" + path.resolve().as_posix().replace("'", "'\\''") + "'\n" for path in blocks),
+                        encoding="utf-8")
+    _run([*inputs, "-f", "concat", "-safe", "0", "-i", str(playlist), "-c:a", "copy", "-rf64", "auto", str(dry)], cancel)
+
+
 def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: float | None = None, cancel=None) -> MixReport:
     """Rend le mixage audio de la timeline dans `out_path` (WAV PCM 24 bits stéréo). Ne modifie aucun média.
 
@@ -303,10 +391,20 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
     plan = build_mix_plan(tl)
     warnings = list(plan.warnings)
     infos: dict[str, AudioInfo] = {}
-    for m in dict.fromkeys(e.media for e in plan.events):
+    candidates = dict.fromkeys(e.media for e in plan.events)
+    direct = {c.media for c in tl.clips if c.audio == "source" and c.id not in plan.silent}
+    for c in tl.clips:
+        if c.audio == "group" and c.id not in plan.silent:
+            for angle in tl.group(c.group).angles:
+                if angle.usable and angle.has_audio and (media_root / angle.media).is_file():
+                    candidates.setdefault(angle.media, None)
+    for m in candidates:
         f = media_root / m
         if not f.is_file():
-            raise TimelineError(f"média introuvable : {f}")
+            if m in direct:
+                raise TimelineError(f"média introuvable : {f}")
+            warnings.append(f"{m} : source audio multicam introuvable")
+            continue
         info = probe_audio(f, cancel=cancel)
         if info is None:
             warnings.append(f"{m} n'a pas de piste audio : ignoré")
@@ -316,18 +414,14 @@ def render_mix(tl: Timeline, media_root: Path, out_path: Path, *, duration: floa
                 warnings.append(f"{m} : {info.sample_rate} Hz rééchantillonné en {plan.sample_rate} Hz")
             if info.channels > 2 and not any(e.strips for e in plan.events if e.media == m):
                 warnings.append(f"{m} : {info.channels} canaux, seuls les deux premiers sont repris (définir des canaux explicites)")
+    plan = build_mix_plan(tl, {m: info.duration for m, info in infos.items()})
+    warnings.extend(note for note in plan.warnings if note not in warnings)
     plan.events = [e for e in plan.events if e.media in infos]
     total = duration if duration is not None else plan.duration
-    media, graph = build_filtergraph(plan, infos, total)
     with tempfile.TemporaryDirectory(prefix="kolnoa_mix_") as tmp:
         tmp = Path(tmp)
-        script, dry = tmp / "graph.txt", tmp / "dry.wav"
-        script.write_text(graph, encoding="utf-8")
-        cmd = [ffmpeg_bin(), "-y", "-v", "error"]
-        for m in media:
-            cmd += ["-i", str(media_root / m)]
-        graph_cmd = [*_filter_script_args(str(script)), "-map", "[out]"]
-        _run(cmd + graph_cmd + ["-t", f"{total:.6f}", "-ar", str(plan.sample_rate), "-c:a", "pcm_f32le", str(dry)], cancel)
+        dry = tmp / "dry.wav"
+        _render_dry(plan, infos, total, media_root, tmp, dry, cancel)
         before = measure_loudness(dry, cancel=cancel)
         st = tl.audio_settings
         gain = 0.0
