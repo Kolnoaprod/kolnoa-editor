@@ -831,10 +831,12 @@ class AppWindow(QMainWindow):
             self._operation.cancel_or_close()
             e.ignore()
             return
+        self._preview_request = None
         if self._preview_worker is not None:
             self._preview_worker.cancel.cancel()
             self._preview_worker.wait()
         self.pause()
+        self._grab_timer.stop()
         if self._program_player is not None:
             self._program_player.stop()
             self._program_player.setSource(QUrl())
