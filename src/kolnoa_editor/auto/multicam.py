@@ -18,6 +18,7 @@ from ..timeline.model import Angle, MulticamGroup, Timeline, TimelineError
 from ..timeline.ops import AddGroup, add_multicam_clip
 from .analysis import RushInfo, speech_moments
 from .builder import GenerationReport
+from .condensed import source_folder
 from .angles import AnglePick, choose_visual
 from .planner import StyleParams
 from .visual import AnalysisStats, VisualParams, analyze_angle
@@ -42,13 +43,13 @@ class GroupProposal:
     start: float = 0.0
 
 
-def propose_groups(rushes: list[RushInfo], min_overlap: float = 5.0, only_section: str | None = None) -> list[GroupProposal]:
+def propose_groups(rushes: list[RushInfo], min_overlap: float = 5.0, only_section: str | None = None, *, across_folders=False) -> list[GroupProposal]:
     """Rushes d'une même séquence dont les plages [début, début+durée] se chevauchent d'au moins `min_overlap` s = un groupe."""
     out: list[GroupProposal] = []
     by_sec: dict[str, list[RushInfo]] = {}
     for r in rushes:
         if _t(r) is not None and (only_section is None or r.group == only_section):
-            by_sec.setdefault(r.group, []).append(r)
+            by_sec.setdefault("Film condensé" if across_folders else r.group, []).append(r)
     for sec, rs in sorted(by_sec.items()):
         rs = sorted(rs, key=lambda r: (_t(r), r.media))
         cluster: list[RushInfo] = []
@@ -56,7 +57,7 @@ def propose_groups(rushes: list[RushInfo], min_overlap: float = 5.0, only_sectio
         def flush():
             if len(cluster) >= 2:
                 with_audio = [r for r in cluster if r.has_audio]
-                if with_audio:
+                if with_audio and (not across_folders or len({source_folder(r) for r in cluster}) > 1):
                     m = max(with_audio, key=lambda r: (r.duration, r.media))
                     t0 = _t(m)
                     out.append(GroupProposal(f"{sec} {len(out) + 1}", sec, list(cluster), m.media,

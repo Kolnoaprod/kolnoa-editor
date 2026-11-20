@@ -15,8 +15,9 @@ from typing import Callable
 from ..auto import (DirectiveResult, EditContext, RushInfo, StyleParams, analyze_silences, apply_directive, generate_first_edit,
                     parse_directive, plan_sequence, speech_moments)
 from ..auto.directives import DirectiveError
-from ..auto.visual import VisualParams
-from ..ffmpeg import CancelToken, Cancelled
+from ..auto.condensed import BalancedThresholds, MediaScope, select_portions
+from ..auto.visual import VisualParams, analyze_angle
+from ..ffmpeg import CancelToken, Cancelled, FFmpegError
 from ..project import Project
 from ..scanner import SourceFile, load_library, refresh
 from ..timeline import Scope, Selection, Session, Timeline
@@ -122,7 +123,9 @@ class ProjectController:
 
     def build_with_multicam(self, prompt: str = "Monte-moi cette séquence", section: str | None = None, style: StyleParams | None = None,
                             analyzer: Analyzer | None = None, source_factory=None, sync_cfg=None, on_section=None,
-                            visual=None, *, cancel: CancelToken | None = None, on_progress=None) -> dict:
+                            visual=None, *, cancel: CancelToken | None = None, on_progress=None,
+                            media_scope: MediaScope | None = None, balanced: BalancedThresholds | None = None,
+                            synchronize: bool = True) -> dict:
         """Comme `build`, mais les rushes qui se chevauchent dans le temps (plusieurs caméras) sont regroupés, synchronisés par l'audio puis montés
         en MULTICAM avec choix d'angle automatique ; les autres rushes sont montés à plat. Tout, dans l'ordre chronologique, en UN geste d'annulation.
         Renvoie un compte rendu (groupes, lignes de synchro, angles écartés)."""
@@ -133,6 +136,8 @@ class ProjectController:
             raise DirectiveError("ce n'est pas une demande de montage")
         token = cancel or CancelToken()
         pool = [r for r in self.rushes.values() if section is None or r.group == section]
+        if media_scope is not None:
+            pool = [rush for rush in pool if media_scope.includes(rush)]
         total = len(pool)
         completed = 0
 
@@ -150,9 +155,9 @@ class ProjectController:
         progress("Regroupement des rushes", message=f"{total} rush(es) parcouru(s). Recherche des chevauchements.")
         st = style or StyleParams(target_s=d.target_s)
         durs = {m: r.duration for m, r in self.rushes.items()}
-        props = M.propose_groups(pool, only_section=section)
+        props = M.propose_groups(pool, only_section=section, across_folders=media_scope is not None) if synchronize else []
         covered = {r.media for p in props for r in p.members}
-        report = {"groups": [], "plain": 0}
+        report = {"groups": [], "plain": 0, "analyzed": total, "decisions": []}
         blocks = [("mc", p.start, p) for p in props]
         rest = sorted((r for r in pool if r.media not in covered), key=lambda r: (M._t(r) or 0.0, r.media))
         for r in rest:
@@ -179,6 +184,27 @@ class ProjectController:
                 generate_first_edit(self.session, shots, label=prompt, durations=durs, on_section=on_section,
                                     on_file=placing, on_file_done=placed)
 
+        def select_flat(rushes):
+            if balanced is None:
+                return plan_sequence(rushes, st)
+            shots = []
+            params = visual or VisualParams()
+            for rush in rushes:
+                progress("Analyse des plages", rush.media, f"Analyse qualitative — {rush.media}")
+                src = self._fresh_proxy(rush.media) or self.project.root / rush.media
+                try:
+                    samples = analyze_angle(src, 0, rush.duration, params, self.project.data / "analysis", cancel=token)
+                except Cancelled:
+                    raise
+                except (OSError, FFmpegError) as error:
+                    report["decisions"].append(f"{rush.media} : analyse impossible ({error})")
+                    continue
+                chosen, notes = select_portions(rush, samples, params.slot_s, st, balanced)
+                report["decisions"].extend(f"{rush.media} · {note}" for note in notes)
+                report["decisions"].append(f"{rush.media} · {len(chosen)} plage(s) retenue(s)")
+                shots.extend(chosen)
+            return shots
+
         with self.session.group(prompt, "auto", Scope(pos0, 10 ** 9)):
             i = 0
             while i < len(blocks):
@@ -190,7 +216,7 @@ class ProjectController:
                         i += 1
                         run.append(blocks[i][2])
                     progress("Sélection des plans", run[0].media, f"Sélection dans {len(run)} rush(es)")
-                    shots = plan_sequence(run, st)
+                    shots = select_flat(run)
                     place_plain(shots, run)
                     report["plain"] += len(shots)
                 else:
@@ -226,10 +252,23 @@ class ProjectController:
                                              "analysis": None if stats is None else {"angles": stats.angles, "frames": stats.frames,
                                                                                     "seconds": round(stats.seconds, 2), "cache_hits": stats.cache_hits,
                                                                                     "peak_rss_mb": stats.peak_rss_mb, "notes": stats.notes}})
+                    if balanced is not None:
+                        separate = [self.rushes[angle.media] for angle in grp.angles if not angle.usable]
+                        if separate:
+                            report["decisions"].extend(f"{rush.media} · synchronisation incertaine, conservé dans les rushes"
+                                                       for rush in separate)
                     completed += len(obj.members)
                     if on_section:
                         on_section(obj.name, 0, 0)
                 i += 1
+        if balanced is not None:
+            clips = [clip for clip in self.tl.clips_on("V1") if clip.start >= pos0]
+            report.update(used=len({clip.media for clip in clips}), segments=len(clips),
+                          duration=(max((clip.end for clip in clips), default=pos0) - pos0) / self.tl.fps)
+            for note in report["decisions"]:
+                progress("Journal des décisions", message=note)
+            if not clips:
+                raise DirectiveError("Aucun passage retenu. Consultez le journal des décisions.")
         progress("Finalisation", message=f"{total} rush(es) assemblé(s) ou évalué(s).")
         return report
 

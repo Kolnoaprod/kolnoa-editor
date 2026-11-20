@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QLis
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
+from ..auto.condensed import BalancedThresholds, MediaScope
 from ..auto.playhead import selection_from_playhead
 from ..ffmpeg import Cancelled
 from ..timeline import Selection, TimelineError
@@ -111,11 +112,14 @@ class AppWindow(QMainWindow):
         send = QPushButton("Envoyer")
         send.clicked.connect(lambda: self.run_prompt(self.prompt.text()))
         self.prompt.returnPressed.connect(lambda: self.run_prompt(self.prompt.text()))
+        condensed = QPushButton("Film condensé (essai)")
+        condensed.clicked.connect(self.configure_condensed)
         bar.addWidget(b)
+        bar.addWidget(condensed)
         bar.addWidget(self.prompt, 1)
         bar.addWidget(send)
         left = QVBoxLayout()
-        left.addWidget(QLabel("Rushes par séquence (sélectionner une séquence pour ne monter qu'elle)"))
+        left.addWidget(QLabel("Dossiers sources (le montage classique suit le dossier sélectionné)"))
         left.addWidget(self.rushes, 1)
         lw = QWidget()
         lw.setLayout(left)
@@ -427,7 +431,32 @@ class AppWindow(QMainWindow):
         it = self.rushes.currentItem()
         return it.data(Qt.UserRole) if it else None
 
-    def run_prompt(self, text: str) -> bool:
+    def configure_condensed(self):
+        from PySide6.QtWidgets import QCheckBox, QDialog, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Film condensé · Balanced")
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Durée libre · cochez les rushes à analyser"))
+        media = QListWidget()
+        for path in sorted(self.ctl.rushes):
+            item = QListWidgetItem(path, media)
+            item.setCheckState(Qt.Checked)
+        layout.addWidget(media)
+        sync = QCheckBox("Synchroniser les angles par l’audio")
+        sync.setChecked(True)
+        layout.addWidget(sync)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Lancer l’analyse")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(590, 420)
+        if dialog.exec():
+            chosen = frozenset(media.item(i).text() for i in range(media.count()) if media.item(i).checkState() == Qt.Checked)
+            self.run_prompt("Monte-moi cette séquence", media_scope=MediaScope(chosen), synchronize=sync.isChecked())
+
+    def run_prompt(self, text: str, *, media_scope=None, synchronize=True) -> bool:
         """Renvoie True si la demande est acceptée. Le montage se termine en arrière-plan."""
         if self._operation is not None and self._operation.running:
             return False
@@ -438,11 +467,13 @@ class AppWindow(QMainWindow):
             from ..auto.directives import parse_directive
             d = parse_directive(text)
             if d.kind == "build":
-                section = self.selected_sequence()
+                section = self.selected_sequence() if media_scope is None else None
 
                 def work(cancel, progress):
                     return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
-                                                      analyzer=self.analyzer, source_factory=self.sync_source_factory)
+                                                      analyzer=self.analyzer, source_factory=self.sync_source_factory,
+                                                      media_scope=media_scope, synchronize=synchronize,
+                                                      balanced=BalancedThresholds() if media_scope is not None else None)
 
                 def apply(result):
                     draft, rep = result
@@ -452,6 +483,10 @@ class AppWindow(QMainWindow):
                     skipped = [f"{g['name']}: {', '.join(g['skipped'])}" for g in groups if g["skipped"]]
                     self.prompt.clear()
                     self.refresh()
+                    if media_scope is not None:
+                        self._operation.log.appendPlainText(
+                            f"{rep['analyzed']} rushes analysés, {rep['used']} utilisés, {rep['segments']} segments, "
+                            f"{rep['duration']:.1f} s.")
                     return (f"Montage posé : {len(groups)} groupe(s) multicam, {rep['plain']} plan(s) à plat. Ctrl+Z annule la génération."
                             + (" Angles écartés : " + " · ".join(skipped) if skipped else ""))
 
