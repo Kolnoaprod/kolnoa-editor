@@ -321,3 +321,13 @@ def test_sources_are_never_modified(tmp_path):
     execute(tl, set_audio_settings(tl, target_lufs=-20.0))
     render(tl, tmp_path)
     assert sha(tmp_path / "t.wav") == before
+
+
+def test_audio_falls_back_after_master_ends(tmp_path):
+    rec = tone(400, 3.0, 0.25)
+    other = tone(900, 7.0, 0.45)
+    tl = group_tl(tmp_path, rec, other, offset=1.0, rec_len=7.0)
+    out, report = render(tl, tmp_path, "fallback.wav")
+    assert np.max(np.abs(seg(out, 1.4, 2.5))) == pytest.approx(.25, abs=.02)
+    assert np.max(np.abs(seg(out, 4.0, 5.0))) == pytest.approx(.45, abs=.02)
+    assert any("son repris" in warning for warning in report.warnings)

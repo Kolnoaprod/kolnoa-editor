@@ -66,15 +66,21 @@ def test_preview_shows_the_visible_clip(win):
     assert grab_frame(win.ctl.project.root, "absent.mp4", 0) is None
 
 
-def test_play_advances_playhead_and_pauses(win):
-    win.toggle_play()
-    assert win._playing
+def test_play_prepares_continuous_video_and_audio(win):
     import time
-    t0 = time.time()
-    while time.time() - t0 < 0.5:
-        QApplication.processEvents()
-        time.sleep(0.02)
-    assert win.tlv.playhead > 0
+    from kolnoa_editor.probe import probe
+    from kolnoa_editor.timeline.audio_mix import measure_loudness
+
     win.toggle_play()
-    assert not win._playing
-    assert win.timecode.text() != "00:00:00:00"
+    deadline = time.monotonic() + 20
+    while win._operation.running and time.monotonic() < deadline:
+        QApplication.processEvents()
+        time.sleep(.02)
+    assert win._operation.bar.value() == 100, win.status.text()
+    path = win._program_player.source().toLocalFile()
+    media = probe(path)
+    assert media.has_audio and media.width == 960
+    assert media.duration == pytest.approx(6, abs=.15)
+    assert measure_loudness(path).integrated_lufs is not None
+    assert win._program_player.audioOutput() is not None
+    win.pause()
