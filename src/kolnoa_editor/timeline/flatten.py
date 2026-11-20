@@ -128,6 +128,16 @@ def check_flatten(tl: Timeline, fl: Flattened | None = None, media_exists: Calla
             out.append(Issue("error", f"{c.id}: média introuvable ({c.media})"))
         elif source_len is not None:
             n = source_len(c.media)
-            if n is not None and c.src_in + c.duration / tl.fps * speed > n + 1e-3:
-                out.append(Issue("error", f"{c.id}: dépasse la fin de la source ({c.src_in + c.duration / tl.fps * speed:.3f} s > {n:.3f} s)"))
+            step = speed / tl.fps
+            end = c.src_in + c.duration * step
+            if n is not None and end > n + 0.001:
+                # Une durée de clip est arrondie à l'image la plus proche. La dernière
+                # image doit toujours commencer dans la source. L'encodeur prolonge
+                # cette image jusqu'à la limite de la timeline si nécessaire.
+                rounded = end - n <= step / 2 + 0.001 and end - step < n
+                message = f"{c.id}: dépasse la fin de la source ({end:.3f} s > {n:.3f} s)"
+                if rounded:
+                    out.append(Issue("warning", f"{c.id}: fin de source ajustée à l'image près ({end - n:.3f} s)"))
+                else:
+                    out.append(Issue("error", message))
     return out

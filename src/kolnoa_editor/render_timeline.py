@@ -9,6 +9,7 @@ Pas encore pris en charge : transitions/fondus vidéo, étalonnage, vitesse vari
 
 from __future__ import annotations
 
+from functools import lru_cache
 import hashlib
 import json
 import logging
@@ -101,6 +102,7 @@ def preflight_timeline(tl: Timeline, media_root: Path, *, cancel=None) -> tuple[
 
     def exists(m): return (media_root / m).is_file()
 
+    @lru_cache(maxsize=None)
     def length(m):
         try:
             return probe(media_root / m, cancel=cancel).duration
