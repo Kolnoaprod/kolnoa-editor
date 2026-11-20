@@ -119,6 +119,7 @@ def main(argv: list[str]) -> int:
     from kolnoa_editor import __version__
     from kolnoa_editor.app import ProjectController
     from kolnoa_editor.app.instance import InstanceLock, engine_dir
+    from kolnoa_editor.app.media_manifest import MediaManifest
     from kolnoa_editor.ffmpeg import Cancelled
     from kolnoa_editor.ui.activation import ActivationServer, notify_running_instance
     from kolnoa_editor.ui.app_window import AppWindow
@@ -159,8 +160,8 @@ def main(argv: list[str]) -> int:
         demo = "--demo" in argv and bool(args)
         if args:
             root = Path(args[0])
-            if not demo and not root.is_dir():
-                raise ValueError(f"Dossier de rushes introuvable : {root}")
+            if not demo and not root.is_dir() and not (root.is_file() and root.suffix.lower() == ".klnprj"):
+                raise ValueError(f"Dossier de rushes ou projet introuvable : {root}")
         else:
             picker = QFileDialog(None, "Kolnoa Editor — Dossier de rushes")
             picker.setFileMode(QFileDialog.Directory)
@@ -175,10 +176,15 @@ def main(argv: list[str]) -> int:
                 progress("Création des rushes de démonstration", str(root), None, None, None)
                 make_demo(root, cancel=cancel)
             cancel.raise_if_cancelled()
+            if not demo and root.suffix.lower() == ".klnprj" and root.is_file():
+                manifest = MediaManifest(root)
+                if manifest.root is None or manifest.data_dir is None:
+                    raise ValueError("Ce fichier ne référence pas un projet Kolnoa.")
+                return ProjectController.open(manifest.root, manifest.data_dir), manifest
             ctl = ProjectController.open(root, data_dir_for(root))
             if not ctl.rushes:
                 ctl.import_rushes(cancel=cancel, on_progress=progress)
-            return ctl
+            return ctl, None
 
         worker = OperationWorker(open_project)
         dialog = OperationDialog("Kolnoa Editor — Ouverture du projet", worker)
@@ -196,7 +202,8 @@ def main(argv: list[str]) -> int:
         dialog.exec()
         if worker.error is not None:
             return 0 if isinstance(worker.error, Cancelled) else 1
-        active_window = AppWindow(worker.result)
+        ctl, manifest = worker.result
+        active_window = AppWindow(ctl, manifest=manifest)
         show_window()
         app.setQuitOnLastWindowClosed(True)
         logging.info("Fenêtre principale affichée")
