@@ -25,9 +25,9 @@ from . import layout as L
 from .peaks import PeakPyramid
 from .shortcuts import Shortcuts
 
-BG, RULER_BG, GRID = QColor("#0d0f13"), QColor("#161a21"), QColor("#232a35")
-CLIP_COLORS = {"video": QColor("#3b6ea8"), "audio": QColor("#3f7f5f")}
-SELECTED, PLAYHEAD, GHOST = QColor("#ffd24a"), QColor("#ff5050"), QColor(255, 255, 255, 90)
+BG, RULER_BG, GRID = QColor("#0e1014"), QColor("#171a20"), QColor("#1f242d")
+CLIP_COLORS = {"video": QColor("#4672b5"), "audio": QColor("#3e8a68")}
+SELECTED, PLAYHEAD, GHOST = QColor("#e8a33d"), QColor("#ff6a4d"), QColor(255, 255, 255, 90)
 SNAP_PX = 8
 
 
@@ -100,7 +100,7 @@ class TimelineView(QWidget):
 
     def fit(self) -> None:
         self.vp.width = self.width()
-        self.vp.fit(self.tl.end_frame())
+        self.vp.fit(self.tl.end_frame)
         self.update()
 
     # --- dessin ---------------------------------------------------------------------------------------------
@@ -159,13 +159,19 @@ class TimelineView(QWidget):
                     continue
                 xl, xr = self.vp.x_of(c.start), self.vp.x_of(c.end)
                 rect = QRectF(xl, y + 1, max(1.0, xr - xl - 1), h - 2)
-                p.fillRect(rect, CLIP_COLORS.get(kind, CLIP_COLORS["video"]))
+                base = CLIP_COLORS.get(kind, CLIP_COLORS["video"])
+                p.setPen(Qt.NoPen)
+                p.setBrush(base)
+                p.drawRoundedRect(rect, 3, 3)
+                p.setBrush(QColor(255, 255, 255, 28))                  # liseré haut : donne du relief sans dégradé coûteux
+                p.drawRoundedRect(QRectF(rect.x(), rect.y(), rect.width(), min(3.0, rect.height())), 3, 3)
+                p.setBrush(Qt.NoBrush)
                 if kind == "audio" and xr - xl > 4:
                     self._paint_wave(p, c, xl, xr, y, h)
                     vis[c.media] = min(vis.get(c.media, 1e18), abs((c.start + c.end) / 2 - mid))
                 if c.id in self.selection:
                     p.setPen(QPen(SELECTED, 2))
-                    p.drawRect(rect.adjusted(1, 1, -1, -1))
+                    p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 3, 3)
                 if xr - xl > 40:
                     p.setPen(QPen(QColor("#e8edf5")))
                     p.drawText(rect.adjusted(4, 2, -2, -2), Qt.AlignLeft | Qt.AlignTop, c.label or c.id)

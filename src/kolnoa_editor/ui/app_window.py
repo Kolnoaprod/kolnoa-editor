@@ -29,6 +29,7 @@ from ..timeline import Selection, TimelineError
 from .operation import OperationDialog, OperationWorker
 from .peak_service import PeakService
 from .preview import frame_request, grab_frame
+from .theme import apply_theme
 from .timeline_view import TimelineView
 
 
@@ -38,6 +39,7 @@ class AppWindow(QMainWindow):
         self.player_factory = player_factory       # (controller, group_id) -> widget lecteur (avec `.player`) | None ; défaut : lecteur multicam réel
         self.sync_source_factory = sync_source_factory
         self.player_view = None
+        self._fitted = False
         self._player_gid = None
         self.ctl = controller
         self.media_manifest = manifest or MediaManifest(controller.project.data / "Medias.klnprj")
@@ -70,7 +72,7 @@ class AppWindow(QMainWindow):
         self.preview.setMinimumHeight(240)
         self.preview.setStyleSheet("background:#111;color:#888")
         self.timecode = QLabel("00:00:00:00")
-        self.play_btn = QPushButton("▶ Lecture")
+        self.play_btn = QPushButton("▶")
         self.play_btn.clicked.connect(self.toggle_play)
         self._playing = False
         self._playback_dir = None
@@ -125,48 +127,147 @@ class AppWindow(QMainWindow):
         a.setShortcut(QKeySequence("Space"))
         a.triggered.connect(lambda _=False: self.toggle_play())
         e.addAction(a)
-        bar = QHBoxLayout()
-        b = QPushButton("Monte-moi cette séquence")
-        b.clicked.connect(lambda: self.run_prompt("Monte-moi cette séquence"))
-        send = QPushButton("Envoyer")
-        send.clicked.connect(lambda: self.run_prompt(self.prompt.text()))
-        self.prompt.returnPressed.connect(lambda: self.run_prompt(self.prompt.text()))
-        condensed = QPushButton("Film condensé (essai)")
-        condensed.clicked.connect(self.configure_condensed)
-        bar.addWidget(b)
-        bar.addWidget(condensed)
-        bar.addWidget(self.prompt, 1)
-        bar.addWidget(send)
-        left = QVBoxLayout()
-        left.addWidget(QLabel("Dossiers sources (le montage classique suit le dossier sélectionné)"))
-        left.addWidget(self.rushes, 1)
-        lw = QWidget()
-        lw.setLayout(left)
+        # --- habillage : barre du haut, médiathèque, moniteur, barre de consigne, timeline, barre d'état -----------------------
+        apply_theme()
+        self.preview.setObjectName("monitor")
+        self.preview.setStyleSheet("")
+        self.timecode.setObjectName("timecode")
+        self.zone.setObjectName("zone")
+        self.prompt.setObjectName("prompt")
+        self.play_btn.setObjectName("play")
+        self.play_btn.setText("▶")
+        self.play_btn.setToolTip("Lecture / pause (Espace)")
+        self.rushes.setMaximumWidth(16777215)
+
+        def btn(text, fn, name=None, tip=None):
+            b = QPushButton(text)
+            if name:
+                b.setObjectName(name)
+            if tip:
+                b.setToolTip(tip)
+            b.clicked.connect(lambda _=False: fn())
+            return b
+
+        def panel(title, body, right=None):
+            w = QWidget()
+            w.setObjectName("panel")
+            v = QVBoxLayout(w)
+            v.setContentsMargins(12, 10, 12, 12)
+            v.setSpacing(8)
+            h = QHBoxLayout()
+            t = QLabel(title)
+            t.setObjectName("panelTitle")
+            h.addWidget(t)
+            h.addStretch(1)
+            if right is not None:
+                h.addWidget(right)
+            v.addLayout(h)
+            v.addWidget(body, 1)
+            return w
+
+        top = QWidget()
+        top.setObjectName("topbar")
+        th = QHBoxLayout(top)
+        th.setContentsMargins(14, 8, 14, 8)
+        th.setSpacing(10)
+        logo = QLabel("K")
+        logo.setObjectName("logo")
+        brand = QLabel("Kolnoa Editor")
+        brand.setObjectName("brand")
+        self.project_label = QLabel(self.ctl.project.root.name)
+        self.project_label.setObjectName("project")
+        th.addWidget(logo)
+        th.addWidget(brand)
+        th.addWidget(self.project_label)
+        th.addStretch(1)
+        th.addWidget(btn("↶", self.undo, "icon", "Annuler (Ctrl+Z)"))
+        th.addWidget(btn("↷", self.redo, "icon", "Rétablir (Ctrl+Maj+Z)"))
+        th.addWidget(btn("Enregistrer", self.save, None, "Ctrl+S"))
+        th.addWidget(btn("Exporter en MP4", self.export, "primary", "Ctrl+E — 4K ou 1080p au choix"))
+
+        # médiathèque (gauche)
+        imp = btn("＋ Importer", self.choose_external_folder, "chip", "Importer un dossier de rushes")
+        lib = panel("Médiathèque", self.rushes, imp)
+
+        # moniteur (centre haut)
         self.view_box = QVBoxLayout()
+        self.view_box.setSpacing(8)
         self.view_box.addWidget(self.preview, 1)
         tb = QHBoxLayout()
+        tb.setSpacing(6)
+        tb.addWidget(btn("⏮", lambda: self.tlv.set_playhead(0), "icon", "Début"))
         tb.addWidget(self.play_btn)
+        tb.addWidget(btn("⏭", lambda: self.tlv.set_playhead(max((c.end for c in self.ctl.tl.clips), default=1) - 1), "icon", "Fin"))
+        tb.addSpacing(10)
         tb.addWidget(self.timecode)
         tb.addStretch(1)
+        tb.addWidget(self.zone)
         self.view_box.addLayout(tb)
         vb = QWidget()
         vb.setLayout(self.view_box)
+        monitor = panel("Moniteur", vb)
+
+        # consigne (le cœur du logiciel : on parle, il monte)
+        pr = QWidget()
+        pr.setObjectName("panel")
+        pv = QVBoxLayout(pr)
+        pv.setContentsMargins(12, 10, 12, 10)
+        pv.setSpacing(8)
+        row = QHBoxLayout()
+        self.prompt.setPlaceholderText("Dites ce que vous voulez monter…   « Monte-moi cette séquence »  ·  « raccourcis ce plan »  ·  « accélère le rythme »")
+        self.prompt.returnPressed.connect(lambda: self.run_prompt(self.prompt.text()))
+        row.addWidget(self.prompt, 1)
+        row.addWidget(btn("Envoyer", lambda: self.run_prompt(self.prompt.text()), "primary"))
+        pv.addLayout(row)
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        chips.addWidget(btn("✦ Monte-moi cette séquence", lambda: self.run_prompt("Monte-moi cette séquence"), "chip"))
+        chips.addWidget(btn("Film condensé (essai)", self.configure_condensed, "chip"))
+        for label, text in (("Raccourcir la sélection", "raccourcis ce plan"), ("Accélérer le rythme", "accélère le rythme"),
+                            ("Plan de coupe", "remplace par un plan de coupe")):
+            chips.addWidget(btn(label, lambda t=text: (self.prompt.setText(t), self.prompt.setFocus()), "chip",
+                                "Sélectionnez un plan ou posez la tête de lecture, puis Entrée"))
+        chips.addStretch(1)
+        pv.addLayout(chips)
+
+        centre = QVBoxLayout()
+        centre.setSpacing(8)
+        centre.addWidget(monitor, 1)
+        centre.addWidget(pr)
+        cw = QWidget()
+        cw.setLayout(centre)
+        cw.layout().setContentsMargins(0, 0, 0, 0)
+
+        tl_panel = panel("Timeline", self.tlv)
         self.vsplit = QSplitter(Qt.Vertical)
-        self.vsplit.addWidget(vb)
-        self.vsplit.addWidget(self.tlv)
+        self.vsplit.addWidget(cw)
+        self.vsplit.addWidget(tl_panel)
+        self.vsplit.setStretchFactor(0, 3)
         self.vsplit.setStretchFactor(1, 2)
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(lw)
-        top.addWidget(self.vsplit)
-        top.setStretchFactor(1, 6)
+        self.vsplit.setChildrenCollapsible(False)
+        self.vsplit.setSizes([520, 340])
+        tl_panel.setMinimumHeight(250)
+        body = QSplitter(Qt.Horizontal)
+        body.addWidget(lib)
+        body.addWidget(self.vsplit)
+        body.setStretchFactor(0, 0)
+        body.setStretchFactor(1, 1)
+        body.setSizes([300, 1200])
+        body.setChildrenCollapsible(False)
+
         lay = QVBoxLayout()
-        lay.addWidget(top, 1)
-        lay.addWidget(self.zone)
-        lay.addLayout(bar)
-        lay.addWidget(self.status)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(top)
+        inner = QVBoxLayout()
+        inner.setContentsMargins(10, 10, 10, 6)
+        inner.addWidget(body, 1)
+        lay.addLayout(inner, 1)
         w = QWidget()
         w.setLayout(lay)
         self.setCentralWidget(w)
+        self.status.setContentsMargins(12, 2, 0, 2)
+        self.statusBar().addWidget(self.status, 1)
 
     def say(self, text: str) -> None:
         self.status.setText(text)
@@ -179,6 +280,9 @@ class AppWindow(QMainWindow):
             it.setData(Qt.UserRole, seq)
             self.rushes.addItem(it)
         self.tlv.refresh_model()
+        if not self._fitted and self.ctl.tl.clips:
+            self._fitted = True
+            self.tlv.fit()
         self._ensure_player()
         self._update_zone()
 
@@ -280,7 +384,7 @@ class AppWindow(QMainWindow):
         self._playing = True
         self.preview.hide()
         self._program_video.show()
-        self.play_btn.setText("⏸ Pause")
+        self.play_btn.setText("⏸")
         self._seek_program(self.tlv.playhead)
         self._program_player.play()
 
@@ -325,7 +429,7 @@ class AppWindow(QMainWindow):
             self._program_video.hide()
             self.preview.show()
             self._grab_timer.start()
-        self.play_btn.setText("▶ Lecture")
+        self.play_btn.setText("▶")
 
     def _on_playhead(self, frame: int) -> None:
         fps = self.ctl.tl.fps
@@ -824,6 +928,12 @@ class AppWindow(QMainWindow):
             return f"Exporté : {path}" + (f" — {len(warnings)} avertissement(s)" if warnings else "")
 
         self._start_operation("Export MP4", work, apply)
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        if self.ctl.tl.clips and not getattr(self, "_fit_shown", False):
+            self._fit_shown = True
+            QTimer.singleShot(0, self.tlv.fit)               # la largeur réelle n'est connue qu'une fois la fenêtre affichée
 
     def closeEvent(self, e) -> None:
         if self._operation is not None and self._operation.running:

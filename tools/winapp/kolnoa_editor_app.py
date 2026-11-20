@@ -126,6 +126,8 @@ def main(argv: list[str]) -> int:
     from kolnoa_editor.ui.operation import OperationDialog, OperationWorker
 
     app = QApplication.instance() or QApplication(argv)
+    from kolnoa_editor.ui.theme import apply_theme
+    apply_theme(app)                                          # thème avant toute boîte de dialogue
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Kolnoa Editor")
     app.setApplicationVersion(__version__)
