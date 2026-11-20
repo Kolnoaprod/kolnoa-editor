@@ -24,6 +24,7 @@ class SourceMonitor(QWidget):
         self.mark_in = 0.0
         self.mark_out: float | None = None
         self.image = QLabel("Double-cliquez un rush dans la médiathèque pour le visionner ici.")
+        self.image.setWordWrap(True)
         self.image.setObjectName("monitor")
         self.image.setAlignment(Qt.AlignCenter)
         self.image.setMinimumHeight(200)

@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QStackedWidget, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
@@ -31,6 +31,12 @@ from .peak_service import PeakService
 from .preview import frame_request, grab_frame
 from .theme import apply_theme
 from .timeline_view import TimelineView
+
+
+from .media_panel import MediaPanel
+from .side_panels import EffectsPanel, RetouchePanel, speed_transaction
+from .source_monitor import SourceMonitor
+from .assets import asset
 
 
 class AppWindow(QMainWindow):
@@ -91,6 +97,7 @@ class AppWindow(QMainWindow):
         self.tlv.playheadChanged.connect(self._on_playhead)
         self.tlv.rejected.connect(lambda m: self.say("Refusé : " + m))
         self.tlv.selectionChanged.connect(lambda ids: self._update_zone())
+        self.tlv.selectionChanged.connect(lambda ids: self._update_side())
         self.tlv.selectionChanged.connect(lambda ids: self.say(self.explain_selection() or self.status.text()))
         self.refresh()
 
@@ -170,14 +177,40 @@ class AppWindow(QMainWindow):
         th = QHBoxLayout(top)
         th.setContentsMargins(14, 8, 14, 8)
         th.setSpacing(10)
-        logo = QLabel("K")
-        logo.setObjectName("logo")
-        brand = QLabel("Kolnoa Editor")
-        brand.setObjectName("brand")
+        logo = QLabel()
+        pm = QPixmap(str(asset("logo.png")))
+        if not pm.isNull():
+            logo.setPixmap(pm.scaledToHeight(34, Qt.SmoothTransformation))
+        else:
+            logo.setText("Kolnoa")
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedHeight(26)
+        sep.setStyleSheet("color:#38383f;")
+        sub = QLabel("ÉDITEUR")
+        sub.setObjectName("logoSub")
         self.project_label = QLabel(self.ctl.project.root.name)
         self.project_label.setObjectName("project")
         th.addWidget(logo)
-        th.addWidget(brand)
+        th.addWidget(sep)
+        th.addWidget(sub)
+        th.addSpacing(18)
+        self._mode_buttons = []
+        grp = QButtonGroup(self)
+        grp.setExclusive(True)
+        for i, (name, tip) in enumerate((("Médiathèque", "Vos rushes en vignettes ou en liste"),
+                                         ("Effets && transitions", "Vitesse, transitions, image"),
+                                         ("Retouche par prompt", "Corriger le montage en le décrivant"))):
+            b = QPushButton(name)
+            b.setObjectName("mode")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, i=i: self.show_mode(i))
+            grp.addButton(b)
+            th.addWidget(b)
+            self._mode_buttons.append(b)
+        self._mode_buttons[0].setChecked(True)
+        th.addSpacing(14)
         th.addWidget(self.project_label)
         th.addStretch(1)
         th.addWidget(btn("↶", self.undo, "icon", "Annuler (Ctrl+Z)"))
@@ -187,12 +220,34 @@ class AppWindow(QMainWindow):
 
         # médiathèque (gauche)
         imp = btn("＋ Importer", self.choose_external_folder, "chip", "Importer un dossier de rushes")
-        lib = panel("Médiathèque", self.rushes, imp)
+        self.rushes.setMaximumHeight(110)
+        self.rushes.setToolTip("Dossiers de rushes : cliquez pour filtrer la médiathèque (aussi la portée de « Monte-moi cette séquence »)")
+        self.media = MediaPanel(self.ctl)
+        self.media.openRequested.connect(self.open_source)
+        lib_body = QWidget()
+        lv = QVBoxLayout(lib_body)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(6)
+        lv.addWidget(self.rushes)
+        lv.addWidget(self.media, 1)
+        self.effects = EffectsPanel()
+        self.effects.speedRequested.connect(self.apply_speed)
+        self.retouche = RetouchePanel()
+        self.retouche.submitted.connect(self.retouche_submit)
+        self.left_stack = QStackedWidget()
+        for w in (lib_body, self.effects, self.retouche):
+            self.left_stack.addWidget(w)
+        self.left_title = QLabel("Médiathèque")
+        self.left_title.setObjectName("panelTitle")
+        lib = panel("Médiathèque", self.left_stack, imp)
+        self._lib_panel = lib
 
         # moniteur (centre haut)
         self.view_box = QVBoxLayout()
         self.view_box.setSpacing(8)
         self.view_box.addWidget(self.preview, 1)
+        self.source = SourceMonitor(self.ctl.project.root)
+        self.source.placeRequested.connect(self.place_from_source)
         tb = QHBoxLayout()
         tb.setSpacing(6)
         tb.addWidget(btn("⏮", lambda: self.tlv.set_playhead(0), "icon", "Début"))
@@ -205,7 +260,14 @@ class AppWindow(QMainWindow):
         self.view_box.addLayout(tb)
         vb = QWidget()
         vb.setLayout(self.view_box)
-        monitor = panel("Moniteur", vb)
+        self.view_box.setContentsMargins(0, 0, 0, 0)
+        # deux moniteurs côte à côte, comme dans Premiere Pro / DaVinci Resolve : Source (le rush) | Programme (le montage)
+        self.monitors = QSplitter(Qt.Horizontal)
+        self.monitors.addWidget(panel("Source", self.source))
+        self.monitors.addWidget(panel("Programme", vb))
+        self.monitors.setChildrenCollapsible(False)
+        self.monitors.setSizes([520, 640])
+        monitor = self.monitors
 
         # consigne (le cœur du logiciel : on parle, il monte)
         pr = QWidget()
@@ -269,6 +331,71 @@ class AppWindow(QMainWindow):
         self.status.setContentsMargins(12, 2, 0, 2)
         self.statusBar().addWidget(self.status, 1)
 
+    # --- panneau gauche, source, effets, retouche --------------------------------------------------------
+    def show_mode(self, i: int) -> None:
+        self.left_stack.setCurrentIndex(i)
+        self._mode_buttons[i].setChecked(True)
+        self._update_side()
+
+    def open_source(self, media: str) -> None:
+        r = self.ctl.rushes.get(media)
+        if r is None:
+            return
+        self.source.open(media, r.duration)
+        self.say(f"Rush ouvert : {media.rsplit('/', 1)[-1]}")
+
+    def place_from_source(self, media: str, src_in: float, length: float) -> None:
+        from ..timeline.chutier import place_rush
+        tl = self.ctl.tl
+        vt = next((t.id for t in tl.tracks if t.kind == "video" and not t.locked), None)
+        at = next((t.id for t in tl.tracks if t.kind == "audio" and not t.locked), None)
+        if vt is None:
+            self.say("Refusé : aucune piste vidéo déverrouillée.")
+            return
+        try:
+            r = self.ctl.rushes.get(media)
+            tx = place_rush(tl, media, length, vt, int(self.tlv.playhead), src_in, audio_track=at,
+                            source_len=r.duration if r else None)
+            self.ctl.session.do(tx, tx.label or "plan posé")
+        except TimelineError as e:
+            self.say(f"Refusé : {e}")
+            return
+        self.say(f"Plan posé à la tête de lecture ({length:.1f} s). Ctrl+Z annule.")
+        self.refresh()
+
+    def _update_side(self) -> None:
+        ids = list(self.tlv.selection)
+        tl = self.ctl.tl
+        vids = [i for i in ids if tl.track(tl.clip(i).track).kind == "video"] if ids else []
+        if vids:
+            sp = float((tl.clip(vids[0]).extra or {}).get("speed", 1.0))
+            self.effects.set_target(f"{len(vids)} plan(s) vidéo sélectionné(s).", True, sp)
+        else:
+            self.effects.set_target("Sélectionnez un plan vidéo sur la timeline.", False)
+        if self.mark_in is not None and self.mark_out is not None:
+            sc = "zone I / O"
+        elif ids:
+            sc = f"{len(ids)} plan(s) sélectionné(s)"
+        else:
+            sc = "plan sous la tête de lecture"
+        self.retouche.set_scope(sc)
+
+    def apply_speed(self, speed: float) -> None:
+        ids = list(self.tlv.selection)
+        try:
+            tx = speed_transaction(self.ctl.tl, ids, speed,
+                                   lambda m: self.ctl.rushes[m].duration if m in self.ctl.rushes else None)
+            self.ctl.session.do(tx, tx.label)
+        except TimelineError as e:
+            self.say(f"Refusé : {e}")
+            return
+        self.say(tx.label + " — Ctrl+Z annule.")
+        self.refresh()
+
+    def retouche_submit(self, text: str) -> None:
+        ok = self.run_prompt(text)
+        self.retouche.record(text, ok)
+
     def say(self, text: str) -> None:
         self.status.setText(text)
 
@@ -279,6 +406,7 @@ class AppWindow(QMainWindow):
             it = QListWidgetItem(f"{seq or '(sans dossier)'}   ·   {n} rush(es)")
             it.setData(Qt.UserRole, seq)
             self.rushes.addItem(it)
+        self.media.populate(sequence=self.selected_sequence())
         self.tlv.refresh_model()
         if not self._fitted and self.ctl.tl.clips:
             self._fitted = True
