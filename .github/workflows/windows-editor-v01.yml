@@ -5,7 +5,7 @@ name: Kolnoa Editor V0.1.1 (EXE portable Windows)
 on:
   workflow_dispatch:
   pull_request:
-    branches: [feat/v0.1-windows, feat/ui-pro]
+    branches: [feat/v0.1-windows, feat/ui-pro, fix/program-playback-audio]
     paths: ["src/**", "tests/**", "pyproject.toml", "tools/winapp/**", ".github/workflows/windows-editor-v01.yml", "docs/V0_1_1_WINDOWS.md"]
 
 jobs:
