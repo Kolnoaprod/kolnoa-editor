@@ -49,3 +49,13 @@ def mariage(wedding, tmp_path):
     from helpers import copy_wedding
 
     return copy_wedding(wedding, tmp_path / "mariage")
+
+
+def pytest_sessionfinish(session, exitstatus):
+    """Qt (QApplication/QMediaPlayer hors écran) plante à la destruction de l'interpréteur sous Linux APRÈS que tous les tests sont passés,
+    ce qui rendait la CI rouge (code 139) sans qu'aucun test échoue. On sort proprement avec le vrai code de résultat."""
+    if os.environ.get("QT_QPA_PLATFORM") == "offscreen" and os.name == "posix" and os.environ.get("KOLNOA_NO_HARD_EXIT") != "1":
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(int(exitstatus))
