@@ -162,7 +162,13 @@ class MediaPanel(QWidget):
         lay.addLayout(frow)
         lay.addLayout(top)
         lay.addWidget(self.search)
+        self.drop_hint = QLabel("Glissez vos rushes ici\n(fichiers ou dossiers depuis l'Explorateur)\n\nIls restent où ils sont : le projet ne fait que s'y référer.")
+        self.drop_hint.setObjectName("zone")
+        self.drop_hint.setAlignment(Qt.AlignCenter)
+        self.drop_hint.setWordWrap(True)
+        self.drop_hint.setStyleSheet("border: 2px dashed #38383f; border-radius: 12px; padding: 24px; color: #8b8b93;")
         lay.addWidget(self.list, 1)
+        lay.addWidget(self.drop_hint, 1)
         lay.addWidget(self.count)
         self.set_mode("grid")
 
@@ -218,6 +224,9 @@ class MediaPanel(QWidget):
             if not t:
                 self.thumbs.want(media, r.duration)
             n += 1
+        empty = not self.ctl.rushes
+        self.list.setVisible(not empty)
+        self.drop_hint.setVisible(empty)
         self.count.setText(f"{n} rush(es)" + (f" · séquence « {seq or '(sans dossier)'} »" if seq is not None else ""))
 
     # --- dossiers virtuels ----------------------------------------------------------------------------------

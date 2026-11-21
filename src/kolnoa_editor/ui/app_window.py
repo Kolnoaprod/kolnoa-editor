@@ -876,8 +876,16 @@ class AppWindow(QMainWindow):
         def apply(result):
             self.media_manifest, added = result
             self.media_manifest.add_video_references(self.ctl)
+            note = ""
+            if added and not self.ctl.tl.clips:                  # projet vide : cadence et résolution viennent des rushes
+                try:
+                    f = self.ctl.apply_format()
+                    if f:
+                        note = f" Format du projet : {f.get('fps')} i/s."
+                except Exception:                               # noqa: BLE001 — le format reste réglable plus tard
+                    pass
             self.refresh()
-            return f"{len(added)} nouvelle(s) référence(s) dans le chutier importé."
+            return f"{len(added)} nouvelle(s) référence(s) dans le chutier importé.{note}"
 
         self._start_operation("Importation multimédia", work, apply)
 

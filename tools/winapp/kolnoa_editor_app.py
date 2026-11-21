@@ -47,6 +47,13 @@ def work_bases() -> list[Path]:
     return out
 
 
+def workspace_base() -> Path:
+    for base in work_bases():
+        if _writable_dir(base):
+            return base
+    raise OSError("Aucun dossier de travail utilisable (Documents\\Kolnoa_Projets, OneDrive, AppData\\Local\\Kolnoa).")
+
+
 def data_dir_for(root: Path) -> Path:
     ident = hashlib.sha1(str(root.resolve()).lower().encode()).hexdigest()[:8]
     name = f"{root.name or 'projet'}-{ident}"
@@ -195,13 +202,14 @@ def main(argv: list[str]) -> int:
             if not demo and not root.is_dir() and not (root.is_file() and root.suffix.lower() == ".klnprj"):
                 raise ValueError(f"Dossier de rushes ou projet introuvable : {root}")
         else:
-            picker = QFileDialog(None, "Kolnoa Editor — Dossier de rushes")
-            picker.setFileMode(QFileDialog.Directory)
-            active_window = picker
+            from kolnoa_editor.app.catalog import ProjectCatalog
+            from kolnoa_editor.ui.home import HomeDialog
+            home = HomeDialog(ProjectCatalog(workspace_base()))
+            active_window = home
             show_window()
-            if not picker.exec():
+            if not home.exec() or home.result_path is None:
                 return 0
-            root = Path(picker.selectedFiles()[0])
+            root = home.result_path
 
         def open_project(cancel, progress):
             if demo:
@@ -224,6 +232,12 @@ def main(argv: list[str]) -> int:
 
         def opened():
             if worker.error is None or isinstance(worker.error, Cancelled):
+                if worker.error is None and not demo:
+                    try:
+                        from kolnoa_editor.app.catalog import ProjectCatalog
+                        ProjectCatalog(workspace_base()).touch(root)
+                    except OSError:
+                        pass
                 dialog.accept()
             else:
                 import traceback
