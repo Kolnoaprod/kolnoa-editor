@@ -23,10 +23,37 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
+def _writable_dir(path: Path) -> bool:
+    """Vrai si le dossier existe (ou peut être créé) et accepte l'écriture : teste réellement, sans rien supposer."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".kolnoa_probe_{os.getpid()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError as error:
+        logging.warning("Dossier de travail inutilisable %s : %s", path, error)
+        return False
+
+
+def work_bases() -> list[Path]:
+    """Emplacements candidats du dossier de travail, par ordre de préférence (Documents peut être redirigé ou absent)."""
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    out = [home / "Documents" / "Kolnoa_Projets"]
+    if os.environ.get("OneDrive"):
+        out.append(Path(os.environ["OneDrive"]) / "Documents" / "Kolnoa_Projets")
+    local = os.environ.get("LOCALAPPDATA")
+    out.append((Path(local) if local else home / "AppData" / "Local") / "Kolnoa" / "Projets")
+    return out
+
+
 def data_dir_for(root: Path) -> Path:
-    base = Path(os.environ.get("USERPROFILE") or Path.home()) / "Documents" / "Kolnoa_Projets"
     ident = hashlib.sha1(str(root.resolve()).lower().encode()).hexdigest()[:8]
-    return base / f"{root.name or 'projet'}-{ident}"
+    name = f"{root.name or 'projet'}-{ident}"
+    for base in work_bases():
+        if _writable_dir(base):
+            return base / name
+    raise OSError("Aucun dossier de travail utilisable (Documents\\Kolnoa_Projets, OneDrive, AppData\\Local\\Kolnoa). Vérifiez les droits d'écriture.")
 
 
 def make_demo(folder: Path, n: int = 3, seconds: int = 8, *, cancel=None) -> list[Path]:
@@ -199,7 +226,10 @@ def main(argv: list[str]) -> int:
             if worker.error is None or isinstance(worker.error, Cancelled):
                 dialog.accept()
             else:
-                dialog.finish(f"Ouverture impossible : {worker.error}", False)
+                import traceback
+                detail = "".join(traceback.format_exception(type(worker.error), worker.error, worker.error.__traceback__))
+                logging.error("Ouverture impossible : %s", detail)
+                dialog.finish(f"Ouverture impossible : {worker.error}\n\n{detail}", False)
 
         worker.finished.connect(opened)
         worker.start()
