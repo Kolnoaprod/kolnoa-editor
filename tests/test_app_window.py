@@ -223,7 +223,7 @@ def test_auto_progress_on_real_ffmpeg_inputs(app, tmp_path, count):
     ctl.add_rushes([RushInfo(path.name, 2) for path in sorted(root.glob("*.mp4"))])
     window = AppWindow(ctl)
     window.show()
-    assert window.run_prompt("Monte-moi cette séquence")
+    assert window.run_prompt("Monte-moi cette séquence", classic=True)      # parcours souple historique ; le défaut est Balanced
     events = []
     window._operation.worker.progress.connect(lambda *args: events.append(args))
     wait_operation(window, timeout=120)
@@ -263,3 +263,24 @@ def test_instance_lock_and_activation(app, tmp_path):
         first.release()
     assert second.acquire()
     second.release()
+
+
+def test_default_build_is_balanced_with_soft_fallback(app, tmp_path):
+    """Défaut du « Monte-moi » : Balanced + multicam. Sur des rushes très unis Balanced ne retient rien : repli souple signalé, pas d'échec."""
+    import shutil
+
+    from kolnoa_editor.ffmpeg import ffmpeg_bin, run
+    from kolnoa_editor.auto import RushInfo
+
+    root = tmp_path / "m"
+    root.mkdir()
+    run([ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "color=c=gray:s=96x64:r=25:d=2", "-f", "lavfi", "-i", "sine=frequency=500:duration=2",
+         "-c:v", "libx264", "-c:a", "aac", str(root / "a.mp4")])
+    ctl = ProjectController.open(root, tmp_path / "p")
+    ctl.add_rushes([RushInfo("a.mp4", 2)])
+    w = AppWindow(ctl)
+    w.show()
+    assert w.run_prompt("Monte-moi cette séquence")
+    wait_operation(w, timeout=120)
+    assert "Montage posé" in w.status.text() and ctl.tl.clips
+    w.close()

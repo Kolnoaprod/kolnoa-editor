@@ -1020,7 +1020,7 @@ class AppWindow(QMainWindow):
             chosen = frozenset(media.item(i).text() for i in range(media.count()) if media.item(i).checkState() == Qt.Checked)
             self.run_prompt("Monte-moi cette séquence", media_scope=MediaScope(chosen), synchronize=sync.isChecked())
 
-    def run_prompt(self, text: str, *, media_scope=None, synchronize=True) -> bool:
+    def run_prompt(self, text: str, *, media_scope=None, synchronize=True, classic: bool = False) -> bool:
         """Renvoie True si la demande est acceptée. Le montage se termine en arrière-plan."""
         if self._operation is not None and self._operation.running:
             return False
@@ -1032,12 +1032,27 @@ class AppWindow(QMainWindow):
             d = parse_directive(text)
             if d.kind == "build":
                 section = self.selected_sequence() if media_scope is None else None
+                defaulted = media_scope is None and not classic
+                if defaulted:
+                    # défauts du « Monte-moi » : Balanced, multicam synchronisé, durée libre, sur le dossier choisi ou tous les rushes
+                    media_scope = MediaScope(frozenset(m for m, r in self.ctl.rushes.items() if section is None or r.group == section))
+
+                fell_back = []
 
                 def work(cancel, progress):
-                    return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
-                                                      analyzer=self.analyzer, source_factory=self.sync_source_factory,
-                                                      media_scope=media_scope, synchronize=synchronize,
-                                                      balanced=BalancedThresholds() if media_scope is not None else None)
+                    from ..auto.directives import DirectiveError
+                    try:
+                        return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
+                                                          analyzer=self.analyzer, source_factory=self.sync_source_factory,
+                                                          media_scope=media_scope, synchronize=synchronize,
+                                                          balanced=BalancedThresholds() if media_scope is not None else None)
+                    except DirectiveError as error:
+                        if not defaulted or "Aucun passage retenu" not in str(error):
+                            raise
+                        fell_back.append(True)                 # Balanced a tout écarté (rushes très unis…) : montage souple, signalé
+                        return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
+                                                          analyzer=self.analyzer, source_factory=self.sync_source_factory,
+                                                          media_scope=None, synchronize=synchronize, balanced=None)
 
                 def apply(result):
                     draft, rep = result
@@ -1047,11 +1062,14 @@ class AppWindow(QMainWindow):
                     skipped = [f"{g['name']}: {', '.join(g['skipped'])}" for g in groups if g["skipped"]]
                     self.prompt.clear()
                     self.refresh()
-                    if media_scope is not None:
+                    if fell_back:
+                        self._operation.log.appendPlainText("Le tri Balanced n'a rien retenu : montage souple utilisé à la place.")
+                    elif media_scope is not None:
                         self._operation.log.appendPlainText(
                             f"{rep['analyzed']} rushes analysés, {rep['used']} utilisés, {rep['segments']} segments, "
                             f"{rep['duration']:.1f} s.")
                     return (f"Montage posé : {len(groups)} groupe(s) multicam, {rep['plain']} plan(s) à plat. Ctrl+Z annule la génération."
+                            + (" (Balanced n'a rien retenu : montage souple.)" if fell_back else "")
                             + (" Angles écartés : " + " · ".join(skipped) if skipped else ""))
 
                 return self._start_operation("Montage automatique", work, apply)
