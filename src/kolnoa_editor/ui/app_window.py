@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QStackedWidget, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QTabBar, QStackedWidget, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
@@ -73,7 +73,7 @@ class AppWindow(QMainWindow):
         self.prompt.setPlaceholderText("Dites ce que vous voulez : « Monte-moi cette séquence », « raccourcis cette partie de 5 s », "
                                        "« accélère le rythme », « remplace par un plan de coupe »")
         self.status = QLabel("Prêt.")
-        self.preview = QLabel("Aperçu : placez la tête de lecture sur un plan")
+        self.preview = QLabel("Programme\nPlacez la tête de lecture sur un plan, ou dites « Monte-moi cette séquence ».")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumHeight(240)
         self.preview.setStyleSheet("background:#111;color:#888")
@@ -99,6 +99,7 @@ class AppWindow(QMainWindow):
         self.tlv.selectionChanged.connect(lambda ids: self._update_zone())
         self.tlv.selectionChanged.connect(lambda ids: self._update_side())
         self.tlv.selectionChanged.connect(lambda ids: self.say(self.explain_selection() or self.status.text()))
+        self._fill_seq_tabs()
         self.refresh()
 
     # --- construction ----------------------------------------------------------------------------------
@@ -220,10 +221,11 @@ class AppWindow(QMainWindow):
 
         # médiathèque (gauche)
         imp = btn("＋ Importer", self.choose_external_folder, "chip", "Importer un dossier de rushes")
-        self.rushes.setMaximumHeight(110)
+        self.rushes.setMaximumHeight(64)
         self.rushes.setToolTip("Dossiers de rushes : cliquez pour filtrer la médiathèque (aussi la portée de « Monte-moi cette séquence »)")
         self.media = MediaPanel(self.ctl)
         self.media.openRequested.connect(self.open_source)
+        self.rushes.currentRowChanged.connect(lambda _r: self.media.populate(sequence=self.selected_sequence()))
         lib_body = QWidget()
         lv = QVBoxLayout(lib_body)
         lv.setContentsMargins(0, 0, 0, 0)
@@ -300,7 +302,27 @@ class AppWindow(QMainWindow):
         cw.setLayout(centre)
         cw.layout().setContentsMargins(0, 0, 0, 0)
 
-        tl_panel = panel("Timeline", self.tlv)
+        # onglets de séquences (comme les timelines de Premiere / Resolve) + commandes de zoom
+        self.seq_tabs = QTabBar()
+        self.seq_tabs.setObjectName("seqTabs")
+        self.seq_tabs.setExpanding(False)
+        self.seq_tabs.setDrawBase(False)
+        self.seq_tabs.setTabsClosable(False)
+        self.seq_tabs.currentChanged.connect(self._seq_tab_changed)
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(4)
+        zoom_row.addWidget(btn("−", lambda: self._zoom(0.8), "icon", "Zoom arrière (Ctrl + molette)"))
+        zoom_row.addWidget(btn("+", lambda: self._zoom(1.25), "icon", "Zoom avant (Ctrl + molette)"))
+        zoom_row.addWidget(btn("Ajuster", self.tlv.fit, "chip", "Tout le montage dans la fenêtre"))
+        zw = QWidget()
+        zw.setLayout(zoom_row)
+        tl_body = QWidget()
+        tv = QVBoxLayout(tl_body)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(4)
+        tv.addWidget(self.seq_tabs)
+        tv.addWidget(self.tlv, 1)
+        tl_panel = panel("Timeline", tl_body, zw)
         self.vsplit = QSplitter(Qt.Vertical)
         self.vsplit.addWidget(cw)
         self.vsplit.addWidget(tl_panel)
@@ -395,6 +417,37 @@ class AppWindow(QMainWindow):
     def retouche_submit(self, text: str) -> None:
         ok = self.run_prompt(text)
         self.retouche.record(text, ok)
+
+    # --- séquences en onglets ---------------------------------------------------------------------------------
+    def _fill_seq_tabs(self) -> None:
+        self._seq_ids = [None] + [q.id for q in self.media_manifest.sequences]
+        self.seq_tabs.blockSignals(True)
+        while self.seq_tabs.count():
+            self.seq_tabs.removeTab(0)
+        self.seq_tabs.addTab("Montage principal")
+        for q in self.media_manifest.sequences:
+            self.seq_tabs.addTab(q.title)
+        self.seq_tabs.addTab("＋")
+        self.seq_tabs.setTabToolTip(self.seq_tabs.count() - 1, "Nouvelle séquence")
+        active = self.media_manifest.active_sequence
+        self.seq_tabs.setCurrentIndex(self._seq_ids.index(active) if active in self._seq_ids else 0)
+        self.seq_tabs.blockSignals(False)
+
+    def _seq_tab_changed(self, i: int) -> None:
+        if i == len(self._seq_ids):                      # onglet « ＋ »
+            self.create_editorial_sequence()
+            self._fill_seq_tabs()
+            return
+        if i >= 0 and self._seq_ids[i] != self.media_manifest.active_sequence:
+            try:
+                self.switch_editorial_sequence(self._seq_ids[i])
+            except (OSError, ValueError, TimelineError) as error:
+                self.say(f"Ouverture impossible : {error}")
+                self._fill_seq_tabs()
+
+    def _zoom(self, factor: float) -> None:
+        self.tlv.vp.zoom_at(self.tlv.width() / 2, factor)
+        self.tlv.update()
 
     def say(self, text: str) -> None:
         self.status.setText(text)
@@ -879,6 +932,7 @@ class AppWindow(QMainWindow):
         self.tlv.set_playhead(0)
         self._show_preview(None, black=True)
         self.refresh()
+        self._fill_seq_tabs()
         self.say(f"Séquence active · {session.tl.title}")
 
     def show_imported_media(self):

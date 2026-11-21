@@ -11,7 +11,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import QDrag, QIcon, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
+from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QComboBox, QInputDialog, QMenu, QMessageBox, QHBoxLayout, QLabel, QLineEdit, QListView, QListWidget, QListWidgetItem,
                                QPushButton, QVBoxLayout, QWidget)
 
 from ..ffmpeg import ffmpeg_bin
@@ -97,7 +97,8 @@ class RushList(QListWidget):
 
 
 class MediaPanel(QWidget):
-    openRequested = Signal(str)                                 # double-clic sur un rush → moniteur Source
+    openRequested = Signal(str)
+    foldersChanged = Signal()                                 # double-clic sur un rush → moniteur Source
 
     def __init__(self, controller, parent=None):
         super().__init__(parent)
@@ -106,6 +107,9 @@ class MediaPanel(QWidget):
         self.thumbs.ready.connect(self._thumb_ready)
         self.mode = "grid"
         self._placeholder = self._ph()
+        from ..app.bins import BinFolders
+        self.bins = BinFolders(controller.project.data / "bins.json")
+        self.folder_filter: str | None = None               # None = tous ; "" = non rangés ; sinon id de dossier virtuel
 
         self.btn_grid = QPushButton("▦  Vignettes")
         self.btn_list = QPushButton("☰  Liste")
@@ -131,6 +135,23 @@ class MediaPanel(QWidget):
         self.count = QLabel("")
         self.count.setObjectName("zone")
 
+        self.folder_box = QComboBox()
+        self.folder_box.setToolTip("Dossiers virtuels : pure organisation, vos rushes ne bougent pas sur le disque")
+        self.folder_box.currentIndexChanged.connect(self._folder_picked)
+        self.btn_new_folder = QPushButton("＋ Dossier")
+        self.btn_new_folder.setObjectName("chip")
+        self.btn_new_folder.clicked.connect(self.new_folder)
+        self.btn_menu = QPushButton("⋯")
+        self.btn_menu.setObjectName("chip")
+        self.btn_menu.setToolTip("Renommer / supprimer le dossier sélectionné")
+        self.btn_menu.clicked.connect(self._folder_menu)
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
+        self._fill_folders()
+        frow = QHBoxLayout()
+        frow.addWidget(self.folder_box, 1)
+        frow.addWidget(self.btn_new_folder)
+        frow.addWidget(self.btn_menu)
         top = QHBoxLayout()
         top.addWidget(self.btn_grid)
         top.addWidget(self.btn_list)
@@ -138,6 +159,7 @@ class MediaPanel(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
+        lay.addLayout(frow)
         lay.addLayout(top)
         lay.addWidget(self.search)
         lay.addWidget(self.list, 1)
@@ -182,6 +204,8 @@ class MediaPanel(QWidget):
                 continue
             if q and q not in media.lower():
                 continue
+            if self.folder_filter is not None and (self.bins.folder_of(media) or "") != self.folder_filter:
+                continue
             it = QListWidgetItem(self._label(r))
             it.setData(Qt.UserRole, {"media": media, "duration": r.duration})
             it.setToolTip(f"{media}\n{fmt_duration(r.duration)}" + (f"\n{r.device}" if r.device else "") + "\nDouble-clic : ouvrir · Glisser : poser sur la timeline")
@@ -195,6 +219,94 @@ class MediaPanel(QWidget):
                 self.thumbs.want(media, r.duration)
             n += 1
         self.count.setText(f"{n} rush(es)" + (f" · séquence « {seq or '(sans dossier)'} »" if seq is not None else ""))
+
+    # --- dossiers virtuels ----------------------------------------------------------------------------------
+    def _fill_folders(self) -> None:
+        self.folder_box.blockSignals(True)
+        self.folder_box.clear()
+        self.folder_box.addItem("Tous les rushes", None)
+        self.folder_box.addItem("Non rangés", "")
+        for fid, name in self.bins.names().items():
+            self.folder_box.addItem(f"📁  {name}", fid)
+        i = self.folder_box.findData(self.folder_filter)
+        self.folder_box.setCurrentIndex(max(0, i))
+        self.folder_box.blockSignals(False)
+
+    def _folder_picked(self, *_a) -> None:
+        self.folder_filter = self.folder_box.currentData()
+        self.populate()
+
+    def new_folder(self, name: str | None = None) -> None:
+        if not isinstance(name, str):
+            name, ok = QInputDialog.getText(self, "Nouveau dossier", "Nom du dossier")
+            if not ok:
+                return
+        try:
+            fid = self.bins.create(name)
+        except (ValueError, OSError) as e:
+            QMessageBox.warning(self, "Dossier", str(e))
+            return
+        self.folder_filter = fid
+        self._fill_folders()
+        self.populate()
+        self.foldersChanged.emit()
+
+    def _folder_menu(self) -> None:
+        fid = self.folder_box.currentData()
+        if not fid:
+            return
+        menu = QMenu(self)
+        a_ren = menu.addAction("Renommer…")
+        a_del = menu.addAction("Supprimer le dossier (les rushes restent intacts)")
+        act = menu.exec(self.btn_menu.mapToGlobal(self.btn_menu.rect().bottomLeft()))
+        try:
+            if act is a_ren:
+                name, ok = QInputDialog.getText(self, "Renommer", "Nom du dossier", text=self.bins.names()[fid])
+                if ok:
+                    self.bins.rename(fid, name)
+            elif act is a_del:
+                self.bins.delete(fid)
+                self.folder_filter = None
+            else:
+                return
+        except (ValueError, OSError) as e:
+            QMessageBox.warning(self, "Dossier", str(e))
+            return
+        self._fill_folders()
+        self.populate()
+        self.foldersChanged.emit()
+
+    def move_selected(self, fid: str | None) -> None:
+        media = [it.data(Qt.UserRole)["media"] for it in self.list.selectedItems()]
+        if media:
+            self.bins.assign(media, fid)
+            self.populate()
+
+    def _context_menu(self, pos) -> None:
+        if not self.list.selectedItems():
+            return
+        menu = QMenu(self)
+        a_open = menu.addAction("Ouvrir dans Source")
+        sub = menu.addMenu("Ranger dans")
+        acts = {sub.addAction(f"📁  {name}"): fid for fid, name in self.bins.names().items()}
+        a_new = sub.addAction("＋ Nouveau dossier…")
+        a_out = menu.addAction("Sortir du dossier")
+        act = menu.exec(self.list.viewport().mapToGlobal(pos))
+        if act is a_open:
+            self.openRequested.emit(self.list.selectedItems()[0].data(Qt.UserRole)["media"])
+        elif act in acts:
+            self.move_selected(acts[act])
+        elif act is a_new:
+            name, ok = QInputDialog.getText(self, "Nouveau dossier", "Nom du dossier")
+            if ok:
+                try:
+                    self.move_selected(self.bins.create(name))
+                    self._fill_folders()
+                    self.foldersChanged.emit()
+                except (ValueError, OSError) as e:
+                    QMessageBox.warning(self, "Dossier", str(e))
+        elif act is a_out:
+            self.move_selected(None)
 
     def _thumb_ready(self, media: str) -> None:
         p = self.thumbs.cached(media)

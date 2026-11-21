@@ -29,6 +29,13 @@ QWidget#panel {{ background: {BG2}; border: 1px solid {LINE}; border-radius: 8px
 QWidget#topbar {{ background: {BG2}; border-bottom: 1px solid {LINE}; }}
 QLabel#brand {{ font-size: 15px; font-weight: 700; letter-spacing: 0.5px; }}
 QLabel#logoSub {{ color: #808783; font-family: "Segoe UI Light", "Segoe UI"; font-size: 13px; letter-spacing: 5px; }}
+QComboBox {{ background: {BG3}; border: 1px solid {LINE}; border-radius: 7px; padding: 5px 10px; color: {TEXT}; }}
+QComboBox:hover {{ border-color: {ACCENT}; }}
+QComboBox::drop-down {{ border: none; width: 22px; }}
+QComboBox QAbstractItemView {{ background: {BG2}; border: 1px solid {LINE}; selection-background-color: {GOLD_DARK}; selection-color: {ACCENT_HI}; outline: 0; }}
+QTabBar#seqTabs::tab {{ background: {BG2}; color: {MUTED}; border: 1px solid {LINE}; border-bottom: none; border-top-left-radius: 7px; border-top-right-radius: 7px; padding: 5px 14px; margin-right: 2px; }}
+QTabBar#seqTabs::tab:selected {{ background: {GOLD_DARK}; color: {ACCENT_HI}; border-color: {ACCENT}; }}
+QTabBar#seqTabs::tab:hover {{ color: {TEXT}; }}
 QPushButton#mode {{ background: transparent; border: none; border-bottom: 2px solid transparent; border-radius: 0; padding: 14px 16px; color: {TEXT}; }}
 QPushButton#mode:hover {{ color: {ACCENT_HI}; }}
 QPushButton#mode:checked {{ color: {ACCENT_HI}; border-bottom: 2px solid {ACCENT}; }}

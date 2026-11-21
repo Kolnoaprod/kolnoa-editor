@@ -115,6 +115,7 @@ class TimelineView(QWidget):
         p.fillRect(ev.rect(), BG)
         self._paint_rows(p)
         self._paint_clips(p)
+        self._paint_track_labels(p)
         self._paint_ghost(p)
         self._paint_trim(p)
         self._paint_drop(p)
@@ -131,6 +132,14 @@ class TimelineView(QWidget):
         for tid in self.rows.ids:
             y = self.rows.y[tid] + self.rows.height(tid) - 1
             p.drawLine(0, y, self.width(), y)
+
+    def _paint_track_labels(self, p: QPainter) -> None:
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        for tid in self.rows.ids:                       # étiquette de piste (V1, A1…) en pastille, par-dessus les plans
+            y = self.rows.y[tid]
+            p.fillRect(QRectF(0, y + 1, 26, 15), QColor(21, 21, 23, 235))
+            p.setPen(QPen(QColor("#e3b06d")))
+            p.drawText(QRectF(0, y + 1, 26, 15), Qt.AlignCenter, tid)
 
     def _paint_ruler(self, p: QPainter) -> None:
         p.fillRect(0, 0, self.width(), L.RULER_H, RULER_BG)
