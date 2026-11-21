@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QTabBar, QStackedWidget, QFileDialog, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from ..app import ProjectController
@@ -29,7 +29,14 @@ from ..timeline import Selection, TimelineError
 from .operation import OperationDialog, OperationWorker
 from .peak_service import PeakService
 from .preview import frame_request, grab_frame
+from .theme import apply_theme
 from .timeline_view import TimelineView
+
+
+from .media_panel import MediaPanel
+from .side_panels import EffectsPanel, RetouchePanel, speed_transaction
+from .source_monitor import SourceMonitor
+from .assets import asset
 
 
 class AppWindow(QMainWindow):
@@ -38,6 +45,7 @@ class AppWindow(QMainWindow):
         self.player_factory = player_factory       # (controller, group_id) -> widget lecteur (avec `.player`) | None ; défaut : lecteur multicam réel
         self.sync_source_factory = sync_source_factory
         self.player_view = None
+        self._fitted = False
         self._player_gid = None
         self.ctl = controller
         self.media_manifest = manifest or MediaManifest(controller.project.data / "Medias.klnprj")
@@ -65,12 +73,12 @@ class AppWindow(QMainWindow):
         self.prompt.setPlaceholderText("Dites ce que vous voulez : « Monte-moi cette séquence », « raccourcis cette partie de 5 s », "
                                        "« accélère le rythme », « remplace par un plan de coupe »")
         self.status = QLabel("Prêt.")
-        self.preview = QLabel("Aperçu : placez la tête de lecture sur un plan")
+        self.preview = QLabel("Programme\nPlacez la tête de lecture sur un plan, ou dites « Monte-moi cette séquence ».")
         self.preview.setAlignment(Qt.AlignCenter)
         self.preview.setMinimumHeight(240)
         self.preview.setStyleSheet("background:#111;color:#888")
         self.timecode = QLabel("00:00:00:00")
-        self.play_btn = QPushButton("▶ Lecture")
+        self.play_btn = QPushButton("▶")
         self.play_btn.clicked.connect(self.toggle_play)
         self._playing = False
         self._playback_dir = None
@@ -89,7 +97,9 @@ class AppWindow(QMainWindow):
         self.tlv.playheadChanged.connect(self._on_playhead)
         self.tlv.rejected.connect(lambda m: self.say("Refusé : " + m))
         self.tlv.selectionChanged.connect(lambda ids: self._update_zone())
+        self.tlv.selectionChanged.connect(lambda ids: self._update_side())
         self.tlv.selectionChanged.connect(lambda ids: self.say(self.explain_selection() or self.status.text()))
+        self._fill_seq_tabs()
         self.refresh()
 
     # --- construction ----------------------------------------------------------------------------------
@@ -125,48 +135,319 @@ class AppWindow(QMainWindow):
         a.setShortcut(QKeySequence("Space"))
         a.triggered.connect(lambda _=False: self.toggle_play())
         e.addAction(a)
-        bar = QHBoxLayout()
-        b = QPushButton("Monte-moi cette séquence")
-        b.clicked.connect(lambda: self.run_prompt("Monte-moi cette séquence"))
-        send = QPushButton("Envoyer")
-        send.clicked.connect(lambda: self.run_prompt(self.prompt.text()))
-        self.prompt.returnPressed.connect(lambda: self.run_prompt(self.prompt.text()))
-        condensed = QPushButton("Film condensé (essai)")
-        condensed.clicked.connect(self.configure_condensed)
-        bar.addWidget(b)
-        bar.addWidget(condensed)
-        bar.addWidget(self.prompt, 1)
-        bar.addWidget(send)
-        left = QVBoxLayout()
-        left.addWidget(QLabel("Dossiers sources (le montage classique suit le dossier sélectionné)"))
-        left.addWidget(self.rushes, 1)
-        lw = QWidget()
-        lw.setLayout(left)
+        # --- habillage : barre du haut, médiathèque, moniteur, barre de consigne, timeline, barre d'état -----------------------
+        apply_theme()
+        self.preview.setObjectName("monitor")
+        self.preview.setStyleSheet("")
+        self.timecode.setObjectName("timecode")
+        self.zone.setObjectName("zone")
+        self.prompt.setObjectName("prompt")
+        self.play_btn.setObjectName("play")
+        self.play_btn.setText("▶")
+        self.play_btn.setToolTip("Lecture / pause (Espace)")
+        self.rushes.setMaximumWidth(16777215)
+
+        def btn(text, fn, name=None, tip=None):
+            b = QPushButton(text)
+            if name:
+                b.setObjectName(name)
+            if tip:
+                b.setToolTip(tip)
+            b.clicked.connect(lambda _=False: fn())
+            return b
+
+        def panel(title, body, right=None):
+            w = QWidget()
+            w.setObjectName("panel")
+            v = QVBoxLayout(w)
+            v.setContentsMargins(12, 10, 12, 12)
+            v.setSpacing(8)
+            h = QHBoxLayout()
+            t = QLabel(title)
+            t.setObjectName("panelTitle")
+            h.addWidget(t)
+            h.addStretch(1)
+            if right is not None:
+                h.addWidget(right)
+            v.addLayout(h)
+            v.addWidget(body, 1)
+            return w
+
+        top = QWidget()
+        top.setObjectName("topbar")
+        th = QHBoxLayout(top)
+        th.setContentsMargins(14, 8, 14, 8)
+        th.setSpacing(10)
+        logo = QLabel()
+        pm = QPixmap(str(asset("logo.png")))
+        if not pm.isNull():
+            logo.setPixmap(pm.scaledToHeight(34, Qt.SmoothTransformation))
+        else:
+            logo.setText("Kolnoa")
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedHeight(26)
+        sep.setStyleSheet("color:#38383f;")
+        sub = QLabel("ÉDITEUR")
+        sub.setObjectName("logoSub")
+        self.project_label = QLabel(self.ctl.project.root.name)
+        self.project_label.setObjectName("project")
+        th.addWidget(logo)
+        th.addWidget(sep)
+        th.addWidget(sub)
+        th.addSpacing(18)
+        self._mode_buttons = []
+        grp = QButtonGroup(self)
+        grp.setExclusive(True)
+        for i, (name, tip) in enumerate((("Médiathèque", "Vos rushes en vignettes ou en liste"),
+                                         ("Effets && transitions", "Vitesse, transitions, image"),
+                                         ("Retouche par prompt", "Corriger le montage en le décrivant"))):
+            b = QPushButton(name)
+            b.setObjectName("mode")
+            b.setCheckable(True)
+            b.setToolTip(tip)
+            b.clicked.connect(lambda _=False, i=i: self.show_mode(i))
+            grp.addButton(b)
+            th.addWidget(b)
+            self._mode_buttons.append(b)
+        self._mode_buttons[0].setChecked(True)
+        th.addSpacing(14)
+        th.addWidget(self.project_label)
+        th.addStretch(1)
+        th.addWidget(btn("↶", self.undo, "icon", "Annuler (Ctrl+Z)"))
+        th.addWidget(btn("↷", self.redo, "icon", "Rétablir (Ctrl+Maj+Z)"))
+        th.addWidget(btn("Enregistrer", self.save, None, "Ctrl+S"))
+        th.addWidget(btn("Exporter en MP4", self.export, "primary", "Ctrl+E — 4K ou 1080p au choix"))
+
+        # médiathèque (gauche)
+        imp = btn("＋ Importer", self.choose_external_folder, "chip", "Importer un dossier de rushes")
+        self.rushes.setMaximumHeight(64)
+        self.rushes.setToolTip("Dossiers de rushes : cliquez pour filtrer la médiathèque (aussi la portée de « Monte-moi cette séquence »)")
+        self.media = MediaPanel(self.ctl)
+        self.media.openRequested.connect(self.open_source)
+        self.rushes.currentRowChanged.connect(lambda _r: self.media.populate(sequence=self.selected_sequence()))
+        lib_body = QWidget()
+        lv = QVBoxLayout(lib_body)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(6)
+        lv.addWidget(self.rushes)
+        lv.addWidget(self.media, 1)
+        self.effects = EffectsPanel()
+        self.effects.speedRequested.connect(self.apply_speed)
+        self.retouche = RetouchePanel()
+        self.retouche.submitted.connect(self.retouche_submit)
+        self.left_stack = QStackedWidget()
+        for w in (lib_body, self.effects, self.retouche):
+            self.left_stack.addWidget(w)
+        self.left_title = QLabel("Médiathèque")
+        self.left_title.setObjectName("panelTitle")
+        lib = panel("Médiathèque", self.left_stack, imp)
+        self._lib_panel = lib
+
+        # moniteur (centre haut)
         self.view_box = QVBoxLayout()
+        self.view_box.setSpacing(8)
         self.view_box.addWidget(self.preview, 1)
+        self.source = SourceMonitor(self.ctl.project.root)
+        self.source.placeRequested.connect(self.place_from_source)
         tb = QHBoxLayout()
+        tb.setSpacing(6)
+        tb.addWidget(btn("⏮", lambda: self.tlv.set_playhead(0), "icon", "Début"))
         tb.addWidget(self.play_btn)
+        tb.addWidget(btn("⏭", lambda: self.tlv.set_playhead(max((c.end for c in self.ctl.tl.clips), default=1) - 1), "icon", "Fin"))
+        tb.addSpacing(10)
         tb.addWidget(self.timecode)
         tb.addStretch(1)
+        tb.addWidget(self.zone)
         self.view_box.addLayout(tb)
         vb = QWidget()
         vb.setLayout(self.view_box)
+        self.view_box.setContentsMargins(0, 0, 0, 0)
+        # deux moniteurs côte à côte, comme dans Premiere Pro / DaVinci Resolve : Source (le rush) | Programme (le montage)
+        self.monitors = QSplitter(Qt.Horizontal)
+        self.monitors.addWidget(panel("Source", self.source))
+        self.monitors.addWidget(panel("Programme", vb))
+        self.monitors.setChildrenCollapsible(False)
+        self.monitors.setSizes([520, 640])
+        monitor = self.monitors
+
+        # consigne (le cœur du logiciel : on parle, il monte)
+        pr = QWidget()
+        pr.setObjectName("panel")
+        pv = QVBoxLayout(pr)
+        pv.setContentsMargins(12, 10, 12, 10)
+        pv.setSpacing(8)
+        row = QHBoxLayout()
+        self.prompt.setPlaceholderText("Dites ce que vous voulez monter…   « Monte-moi cette séquence »  ·  « raccourcis ce plan »  ·  « accélère le rythme »")
+        self.prompt.returnPressed.connect(lambda: self.run_prompt(self.prompt.text()))
+        row.addWidget(self.prompt, 1)
+        row.addWidget(btn("Envoyer", lambda: self.run_prompt(self.prompt.text()), "primary"))
+        pv.addLayout(row)
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        chips.addWidget(btn("✦ Monte-moi cette séquence", lambda: self.run_prompt("Monte-moi cette séquence"), "chip"))
+        chips.addWidget(btn("Film condensé (essai)", self.configure_condensed, "chip"))
+        for label, text in (("Raccourcir la sélection", "raccourcis ce plan"), ("Accélérer le rythme", "accélère le rythme"),
+                            ("Plan de coupe", "remplace par un plan de coupe")):
+            chips.addWidget(btn(label, lambda t=text: (self.prompt.setText(t), self.prompt.setFocus()), "chip",
+                                "Sélectionnez un plan ou posez la tête de lecture, puis Entrée"))
+        chips.addStretch(1)
+        pv.addLayout(chips)
+
+        centre = QVBoxLayout()
+        centre.setSpacing(8)
+        centre.addWidget(monitor, 1)
+        centre.addWidget(pr)
+        cw = QWidget()
+        cw.setLayout(centre)
+        cw.layout().setContentsMargins(0, 0, 0, 0)
+
+        # onglets de séquences (comme les timelines de Premiere / Resolve) + commandes de zoom
+        self.seq_tabs = QTabBar()
+        self.seq_tabs.setObjectName("seqTabs")
+        self.seq_tabs.setExpanding(False)
+        self.seq_tabs.setDrawBase(False)
+        self.seq_tabs.setTabsClosable(False)
+        self.seq_tabs.currentChanged.connect(self._seq_tab_changed)
+        zoom_row = QHBoxLayout()
+        zoom_row.setSpacing(4)
+        zoom_row.addWidget(btn("−", lambda: self._zoom(0.8), "icon", "Zoom arrière (Ctrl + molette)"))
+        zoom_row.addWidget(btn("+", lambda: self._zoom(1.25), "icon", "Zoom avant (Ctrl + molette)"))
+        zoom_row.addWidget(btn("Ajuster", self.tlv.fit, "chip", "Tout le montage dans la fenêtre"))
+        zw = QWidget()
+        zw.setLayout(zoom_row)
+        tl_body = QWidget()
+        tv = QVBoxLayout(tl_body)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(4)
+        tv.addWidget(self.seq_tabs)
+        tv.addWidget(self.tlv, 1)
+        tl_panel = panel("Timeline", tl_body, zw)
         self.vsplit = QSplitter(Qt.Vertical)
-        self.vsplit.addWidget(vb)
-        self.vsplit.addWidget(self.tlv)
+        self.vsplit.addWidget(cw)
+        self.vsplit.addWidget(tl_panel)
+        self.vsplit.setStretchFactor(0, 3)
         self.vsplit.setStretchFactor(1, 2)
-        top = QSplitter(Qt.Horizontal)
-        top.addWidget(lw)
-        top.addWidget(self.vsplit)
-        top.setStretchFactor(1, 6)
+        self.vsplit.setChildrenCollapsible(False)
+        self.vsplit.setSizes([520, 340])
+        tl_panel.setMinimumHeight(250)
+        body = QSplitter(Qt.Horizontal)
+        body.addWidget(lib)
+        body.addWidget(self.vsplit)
+        body.setStretchFactor(0, 0)
+        body.setStretchFactor(1, 1)
+        body.setSizes([300, 1200])
+        body.setChildrenCollapsible(False)
+
         lay = QVBoxLayout()
-        lay.addWidget(top, 1)
-        lay.addWidget(self.zone)
-        lay.addLayout(bar)
-        lay.addWidget(self.status)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        lay.addWidget(top)
+        inner = QVBoxLayout()
+        inner.setContentsMargins(10, 10, 10, 6)
+        inner.addWidget(body, 1)
+        lay.addLayout(inner, 1)
         w = QWidget()
         w.setLayout(lay)
         self.setCentralWidget(w)
+        self.status.setContentsMargins(12, 2, 0, 2)
+        self.statusBar().addWidget(self.status, 1)
+
+    # --- panneau gauche, source, effets, retouche --------------------------------------------------------
+    def show_mode(self, i: int) -> None:
+        self.left_stack.setCurrentIndex(i)
+        self._mode_buttons[i].setChecked(True)
+        self._update_side()
+
+    def open_source(self, media: str) -> None:
+        r = self.ctl.rushes.get(media)
+        if r is None:
+            return
+        self.source.open(media, r.duration)
+        self.say(f"Rush ouvert : {media.rsplit('/', 1)[-1]}")
+
+    def place_from_source(self, media: str, src_in: float, length: float) -> None:
+        from ..timeline.chutier import place_rush
+        tl = self.ctl.tl
+        vt = next((t.id for t in tl.tracks if t.kind == "video" and not t.locked), None)
+        at = next((t.id for t in tl.tracks if t.kind == "audio" and not t.locked), None)
+        if vt is None:
+            self.say("Refusé : aucune piste vidéo déverrouillée.")
+            return
+        try:
+            r = self.ctl.rushes.get(media)
+            tx = place_rush(tl, media, length, vt, int(self.tlv.playhead), src_in, audio_track=at,
+                            source_len=r.duration if r else None)
+            self.ctl.session.do(tx, tx.label or "plan posé")
+        except TimelineError as e:
+            self.say(f"Refusé : {e}")
+            return
+        self.say(f"Plan posé à la tête de lecture ({length:.1f} s). Ctrl+Z annule.")
+        self.refresh()
+
+    def _update_side(self) -> None:
+        ids = list(self.tlv.selection)
+        tl = self.ctl.tl
+        vids = [i for i in ids if tl.track(tl.clip(i).track).kind == "video"] if ids else []
+        if vids:
+            sp = float((tl.clip(vids[0]).extra or {}).get("speed", 1.0))
+            self.effects.set_target(f"{len(vids)} plan(s) vidéo sélectionné(s).", True, sp)
+        else:
+            self.effects.set_target("Sélectionnez un plan vidéo sur la timeline.", False)
+        if self.mark_in is not None and self.mark_out is not None:
+            sc = "zone I / O"
+        elif ids:
+            sc = f"{len(ids)} plan(s) sélectionné(s)"
+        else:
+            sc = "plan sous la tête de lecture"
+        self.retouche.set_scope(sc)
+
+    def apply_speed(self, speed: float) -> None:
+        ids = list(self.tlv.selection)
+        try:
+            tx = speed_transaction(self.ctl.tl, ids, speed,
+                                   lambda m: self.ctl.rushes[m].duration if m in self.ctl.rushes else None)
+            self.ctl.session.do(tx, tx.label)
+        except TimelineError as e:
+            self.say(f"Refusé : {e}")
+            return
+        self.say(tx.label + " — Ctrl+Z annule.")
+        self.refresh()
+
+    def retouche_submit(self, text: str) -> None:
+        ok = self.run_prompt(text)
+        self.retouche.record(text, ok)
+
+    # --- séquences en onglets ---------------------------------------------------------------------------------
+    def _fill_seq_tabs(self) -> None:
+        self._seq_ids = [None] + [q.id for q in self.media_manifest.sequences]
+        self.seq_tabs.blockSignals(True)
+        while self.seq_tabs.count():
+            self.seq_tabs.removeTab(0)
+        self.seq_tabs.addTab("Montage principal")
+        for q in self.media_manifest.sequences:
+            self.seq_tabs.addTab(q.title)
+        self.seq_tabs.addTab("＋")
+        self.seq_tabs.setTabToolTip(self.seq_tabs.count() - 1, "Nouvelle séquence")
+        active = self.media_manifest.active_sequence
+        self.seq_tabs.setCurrentIndex(self._seq_ids.index(active) if active in self._seq_ids else 0)
+        self.seq_tabs.blockSignals(False)
+
+    def _seq_tab_changed(self, i: int) -> None:
+        if i == len(self._seq_ids):                      # onglet « ＋ »
+            self.create_editorial_sequence()
+            self._fill_seq_tabs()
+            return
+        if i >= 0 and self._seq_ids[i] != self.media_manifest.active_sequence:
+            try:
+                self.switch_editorial_sequence(self._seq_ids[i])
+            except (OSError, ValueError, TimelineError) as error:
+                self.say(f"Ouverture impossible : {error}")
+                self._fill_seq_tabs()
+
+    def _zoom(self, factor: float) -> None:
+        self.tlv.vp.zoom_at(self.tlv.width() / 2, factor)
+        self.tlv.update()
 
     def say(self, text: str) -> None:
         self.status.setText(text)
@@ -178,7 +459,11 @@ class AppWindow(QMainWindow):
             it = QListWidgetItem(f"{seq or '(sans dossier)'}   ·   {n} rush(es)")
             it.setData(Qt.UserRole, seq)
             self.rushes.addItem(it)
+        self.media.populate(sequence=self.selected_sequence())
         self.tlv.refresh_model()
+        if not self._fitted and self.ctl.tl.clips:
+            self._fitted = True
+            self.tlv.fit()
         self._ensure_player()
         self._update_zone()
 
@@ -280,7 +565,7 @@ class AppWindow(QMainWindow):
         self._playing = True
         self.preview.hide()
         self._program_video.show()
-        self.play_btn.setText("⏸ Pause")
+        self.play_btn.setText("⏸")
         self._seek_program(self.tlv.playhead)
         self._program_player.play()
 
@@ -325,7 +610,7 @@ class AppWindow(QMainWindow):
             self._program_video.hide()
             self.preview.show()
             self._grab_timer.start()
-        self.play_btn.setText("▶ Lecture")
+        self.play_btn.setText("▶")
 
     def _on_playhead(self, frame: int) -> None:
         fps = self.ctl.tl.fps
@@ -591,8 +876,16 @@ class AppWindow(QMainWindow):
         def apply(result):
             self.media_manifest, added = result
             self.media_manifest.add_video_references(self.ctl)
+            note = ""
+            if added and not self.ctl.tl.clips:                  # projet vide : cadence et résolution viennent des rushes
+                try:
+                    f = self.ctl.apply_format()
+                    if f:
+                        note = f" Format du projet : {f.get('fps')} i/s."
+                except Exception:                               # noqa: BLE001 — le format reste réglable plus tard
+                    pass
             self.refresh()
-            return f"{len(added)} nouvelle(s) référence(s) dans le chutier importé."
+            return f"{len(added)} nouvelle(s) référence(s) dans le chutier importé.{note}"
 
         self._start_operation("Importation multimédia", work, apply)
 
@@ -647,6 +940,7 @@ class AppWindow(QMainWindow):
         self.tlv.set_playhead(0)
         self._show_preview(None, black=True)
         self.refresh()
+        self._fill_seq_tabs()
         self.say(f"Séquence active · {session.tl.title}")
 
     def show_imported_media(self):
@@ -726,7 +1020,7 @@ class AppWindow(QMainWindow):
             chosen = frozenset(media.item(i).text() for i in range(media.count()) if media.item(i).checkState() == Qt.Checked)
             self.run_prompt("Monte-moi cette séquence", media_scope=MediaScope(chosen), synchronize=sync.isChecked())
 
-    def run_prompt(self, text: str, *, media_scope=None, synchronize=True) -> bool:
+    def run_prompt(self, text: str, *, media_scope=None, synchronize=True, classic: bool = False) -> bool:
         """Renvoie True si la demande est acceptée. Le montage se termine en arrière-plan."""
         if self._operation is not None and self._operation.running:
             return False
@@ -738,12 +1032,27 @@ class AppWindow(QMainWindow):
             d = parse_directive(text)
             if d.kind == "build":
                 section = self.selected_sequence() if media_scope is None else None
+                defaulted = media_scope is None and not classic
+                if defaulted:
+                    # défauts du « Monte-moi » : Balanced, multicam synchronisé, durée libre, sur le dossier choisi ou tous les rushes
+                    media_scope = MediaScope(frozenset(m for m, r in self.ctl.rushes.items() if section is None or r.group == section))
+
+                fell_back = []
 
                 def work(cancel, progress):
-                    return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
-                                                      analyzer=self.analyzer, source_factory=self.sync_source_factory,
-                                                      media_scope=media_scope, synchronize=synchronize,
-                                                      balanced=BalancedThresholds() if media_scope is not None else None)
+                    from ..auto.directives import DirectiveError
+                    try:
+                        return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
+                                                          analyzer=self.analyzer, source_factory=self.sync_source_factory,
+                                                          media_scope=media_scope, synchronize=synchronize,
+                                                          balanced=BalancedThresholds() if media_scope is not None else None)
+                    except DirectiveError as error:
+                        if not defaulted or "Aucun passage retenu" not in str(error):
+                            raise
+                        fell_back.append(True)                 # Balanced a tout écarté (rushes très unis…) : montage souple, signalé
+                        return self.ctl.prepare_auto_edit(text, section, cancel=cancel, on_progress=progress,
+                                                          analyzer=self.analyzer, source_factory=self.sync_source_factory,
+                                                          media_scope=None, synchronize=synchronize, balanced=None)
 
                 def apply(result):
                     draft, rep = result
@@ -753,11 +1062,14 @@ class AppWindow(QMainWindow):
                     skipped = [f"{g['name']}: {', '.join(g['skipped'])}" for g in groups if g["skipped"]]
                     self.prompt.clear()
                     self.refresh()
-                    if media_scope is not None:
+                    if fell_back:
+                        self._operation.log.appendPlainText("Le tri Balanced n'a rien retenu : montage souple utilisé à la place.")
+                    elif media_scope is not None:
                         self._operation.log.appendPlainText(
                             f"{rep['analyzed']} rushes analysés, {rep['used']} utilisés, {rep['segments']} segments, "
                             f"{rep['duration']:.1f} s.")
                     return (f"Montage posé : {len(groups)} groupe(s) multicam, {rep['plain']} plan(s) à plat. Ctrl+Z annule la génération."
+                            + (" (Balanced n'a rien retenu : montage souple.)" if fell_back else "")
                             + (" Angles écartés : " + " · ".join(skipped) if skipped else ""))
 
                 return self._start_operation("Montage automatique", work, apply)
@@ -824,6 +1136,12 @@ class AppWindow(QMainWindow):
             return f"Exporté : {path}" + (f" — {len(warnings)} avertissement(s)" if warnings else "")
 
         self._start_operation("Export MP4", work, apply)
+
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        if self.ctl.tl.clips and not getattr(self, "_fit_shown", False):
+            self._fit_shown = True
+            QTimer.singleShot(0, self.tlv.fit)               # la largeur réelle n'est connue qu'une fois la fenêtre affichée
 
     def closeEvent(self, e) -> None:
         if self._operation is not None and self._operation.running:

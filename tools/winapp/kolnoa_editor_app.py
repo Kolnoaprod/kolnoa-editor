@@ -23,10 +23,44 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
+def _writable_dir(path: Path) -> bool:
+    """Vrai si le dossier existe (ou peut être créé) et accepte l'écriture : teste réellement, sans rien supposer."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".kolnoa_probe_{os.getpid()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return True
+    except OSError as error:
+        logging.warning("Dossier de travail inutilisable %s : %s", path, error)
+        return False
+
+
+def work_bases() -> list[Path]:
+    """Emplacements candidats du dossier de travail, par ordre de préférence (Documents peut être redirigé ou absent)."""
+    home = Path(os.environ.get("USERPROFILE") or Path.home())
+    out = [home / "Documents" / "Kolnoa_Projets"]
+    if os.environ.get("OneDrive"):
+        out.append(Path(os.environ["OneDrive"]) / "Documents" / "Kolnoa_Projets")
+    local = os.environ.get("LOCALAPPDATA")
+    out.append((Path(local) if local else home / "AppData" / "Local") / "Kolnoa" / "Projets")
+    return out
+
+
+def workspace_base() -> Path:
+    for base in work_bases():
+        if _writable_dir(base):
+            return base
+    raise OSError("Aucun dossier de travail utilisable (Documents\\Kolnoa_Projets, OneDrive, AppData\\Local\\Kolnoa).")
+
+
 def data_dir_for(root: Path) -> Path:
-    base = Path(os.environ.get("USERPROFILE") or Path.home()) / "Documents" / "Kolnoa_Projets"
     ident = hashlib.sha1(str(root.resolve()).lower().encode()).hexdigest()[:8]
-    return base / f"{root.name or 'projet'}-{ident}"
+    name = f"{root.name or 'projet'}-{ident}"
+    for base in work_bases():
+        if _writable_dir(base):
+            return base / name
+    raise OSError("Aucun dossier de travail utilisable (Documents\\Kolnoa_Projets, OneDrive, AppData\\Local\\Kolnoa). Vérifiez les droits d'écriture.")
 
 
 def make_demo(folder: Path, n: int = 3, seconds: int = 8, *, cancel=None) -> list[Path]:
@@ -126,6 +160,11 @@ def main(argv: list[str]) -> int:
     from kolnoa_editor.ui.operation import OperationDialog, OperationWorker
 
     app = QApplication.instance() or QApplication(argv)
+    from kolnoa_editor.ui.theme import apply_theme
+    apply_theme(app)                                          # thème avant toute boîte de dialogue
+    from PySide6.QtGui import QIcon
+    from kolnoa_editor.ui.assets import asset
+    app.setWindowIcon(QIcon(str(asset("kolnoa.ico"))))
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Kolnoa Editor")
     app.setApplicationVersion(__version__)
@@ -163,13 +202,14 @@ def main(argv: list[str]) -> int:
             if not demo and not root.is_dir() and not (root.is_file() and root.suffix.lower() == ".klnprj"):
                 raise ValueError(f"Dossier de rushes ou projet introuvable : {root}")
         else:
-            picker = QFileDialog(None, "Kolnoa Editor — Dossier de rushes")
-            picker.setFileMode(QFileDialog.Directory)
-            active_window = picker
+            from kolnoa_editor.app.catalog import ProjectCatalog
+            from kolnoa_editor.ui.home import HomeDialog
+            home = HomeDialog(ProjectCatalog(workspace_base()))
+            active_window = home
             show_window()
-            if not picker.exec():
+            if not home.exec() or home.result_path is None:
                 return 0
-            root = Path(picker.selectedFiles()[0])
+            root = home.result_path
 
         def open_project(cancel, progress):
             if demo:
@@ -192,9 +232,18 @@ def main(argv: list[str]) -> int:
 
         def opened():
             if worker.error is None or isinstance(worker.error, Cancelled):
+                if worker.error is None and not demo:
+                    try:
+                        from kolnoa_editor.app.catalog import ProjectCatalog
+                        ProjectCatalog(workspace_base()).touch(root)
+                    except OSError:
+                        pass
                 dialog.accept()
             else:
-                dialog.finish(f"Ouverture impossible : {worker.error}", False)
+                import traceback
+                detail = "".join(traceback.format_exception(type(worker.error), worker.error, worker.error.__traceback__))
+                logging.error("Ouverture impossible : %s", detail)
+                dialog.finish(f"Ouverture impossible : {worker.error}\n\n{detail}", False)
 
         worker.finished.connect(opened)
         worker.start()

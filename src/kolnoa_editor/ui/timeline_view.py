@@ -25,9 +25,9 @@ from . import layout as L
 from .peaks import PeakPyramid
 from .shortcuts import Shortcuts
 
-BG, RULER_BG, GRID = QColor("#0d0f13"), QColor("#161a21"), QColor("#232a35")
-CLIP_COLORS = {"video": QColor("#3b6ea8"), "audio": QColor("#3f7f5f")}
-SELECTED, PLAYHEAD, GHOST = QColor("#ffd24a"), QColor("#ff5050"), QColor(255, 255, 255, 90)
+BG, RULER_BG, GRID = QColor("#151517"), QColor("#1b1b1e"), QColor("#232327")
+CLIP_COLORS = {"video": QColor("#4f6f9a"), "audio": QColor("#4a8466")}
+SELECTED, PLAYHEAD, GHOST = QColor("#e3b06d"), QColor("#e3b06d"), QColor(255, 255, 255, 90)
 SNAP_PX = 8
 
 
@@ -100,7 +100,7 @@ class TimelineView(QWidget):
 
     def fit(self) -> None:
         self.vp.width = self.width()
-        self.vp.fit(self.tl.end_frame())
+        self.vp.fit(self.tl.end_frame)
         self.update()
 
     # --- dessin ---------------------------------------------------------------------------------------------
@@ -115,6 +115,7 @@ class TimelineView(QWidget):
         p.fillRect(ev.rect(), BG)
         self._paint_rows(p)
         self._paint_clips(p)
+        self._paint_track_labels(p)
         self._paint_ghost(p)
         self._paint_trim(p)
         self._paint_drop(p)
@@ -131,6 +132,14 @@ class TimelineView(QWidget):
         for tid in self.rows.ids:
             y = self.rows.y[tid] + self.rows.height(tid) - 1
             p.drawLine(0, y, self.width(), y)
+
+    def _paint_track_labels(self, p: QPainter) -> None:
+        p.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        for tid in self.rows.ids:                       # étiquette de piste (V1, A1…) en pastille, par-dessus les plans
+            y = self.rows.y[tid]
+            p.fillRect(QRectF(0, y + 1, 26, 15), QColor(21, 21, 23, 235))
+            p.setPen(QPen(QColor("#e3b06d")))
+            p.drawText(QRectF(0, y + 1, 26, 15), Qt.AlignCenter, tid)
 
     def _paint_ruler(self, p: QPainter) -> None:
         p.fillRect(0, 0, self.width(), L.RULER_H, RULER_BG)
@@ -159,13 +168,19 @@ class TimelineView(QWidget):
                     continue
                 xl, xr = self.vp.x_of(c.start), self.vp.x_of(c.end)
                 rect = QRectF(xl, y + 1, max(1.0, xr - xl - 1), h - 2)
-                p.fillRect(rect, CLIP_COLORS.get(kind, CLIP_COLORS["video"]))
+                base = CLIP_COLORS.get(kind, CLIP_COLORS["video"])
+                p.setPen(Qt.NoPen)
+                p.setBrush(base)
+                p.drawRoundedRect(rect, 3, 3)
+                p.setBrush(QColor(255, 255, 255, 28))                  # liseré haut : donne du relief sans dégradé coûteux
+                p.drawRoundedRect(QRectF(rect.x(), rect.y(), rect.width(), min(3.0, rect.height())), 3, 3)
+                p.setBrush(Qt.NoBrush)
                 if kind == "audio" and xr - xl > 4:
                     self._paint_wave(p, c, xl, xr, y, h)
                     vis[c.media] = min(vis.get(c.media, 1e18), abs((c.start + c.end) / 2 - mid))
                 if c.id in self.selection:
                     p.setPen(QPen(SELECTED, 2))
-                    p.drawRect(rect.adjusted(1, 1, -1, -1))
+                    p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), 3, 3)
                 if xr - xl > 40:
                     p.setPen(QPen(QColor("#e8edf5")))
                     p.drawText(rect.adjusted(4, 2, -2, -2), Qt.AlignLeft | Qt.AlignTop, c.label or c.id)

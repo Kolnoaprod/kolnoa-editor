@@ -66,8 +66,51 @@ def test_preview_shows_the_visible_clip(win):
     assert grab_frame(win.ctl.project.root, "absent.mp4", 0) is None
 
 
-def test_play_prepares_continuous_video_and_audio(win):
+class _FakePlayer:
+    """QMediaPlayer segfaulte hors écran sur les runners Linux : on vérifie ici le RENDU préparé (vidéo + son), pas le lecteur Qt.
+    La lecture réelle par QMediaPlayer ne se valide que sous Windows (essai manuel, voir docs)."""
+
+    def __init__(self, path):
+        from PySide6.QtCore import QUrl
+        self._url = QUrl.fromLocalFile(str(path))
+
+    def source(self):
+        return self._url
+
+    def audioOutput(self):
+        return object()
+
+    def setSource(self, url):
+        self._url = url
+
+    def isSeekable(self):
+        return True
+
+    def play(self):
+        pass
+
+    def pause(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def setPosition(self, ms):
+        pass
+
+
+def test_play_prepares_continuous_video_and_audio(win, monkeypatch):
     import time
+
+    def fake_open(self, path):
+        self._program_player = _FakePlayer(path)
+
+    def fake_start(self):
+        self._grab_timer.stop()
+        self._playing = True
+
+    monkeypatch.setattr(AppWindow, "_open_program_player", fake_open)
+    monkeypatch.setattr(AppWindow, "_start_program_player", fake_start)
     from kolnoa_editor.probe import probe
     from kolnoa_editor.timeline.audio_mix import measure_loudness
 
